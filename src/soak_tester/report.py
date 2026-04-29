@@ -67,6 +67,10 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "## Workload observed",
         "",
         f"- iperf workload goodput avg: {achieved.get('iperf.goodput_gbps_avg', 0)} Gbit/s",
+        f"- fio read bandwidth avg: {achieved.get('fio.read_gbps_avg', 0)} Gbit/s",
+        f"- fio write bandwidth avg: {achieved.get('fio.write_gbps_avg', 0)} Gbit/s",
+        f"- fio read IOPS avg: {achieved.get('fio.read_iops_avg', 0)}",
+        f"- fio write IOPS avg: {achieved.get('fio.write_iops_avg', 0)}",
         f"- API achieved avg: {achieved.get('api.ops_per_second_avg', 0)} ops/s",
         "",
         "## Conclusion",
@@ -94,10 +98,10 @@ def _summarize_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
     for name, values in grouped.items():
         avg = sum(values) / len(values)
         result[f"{name}_avg"] = avg
-        if name.endswith("_bps") or name.endswith(".goodput_bps"):
-            result[f"{name.removesuffix('_bps').removesuffix('.goodput')}.goodput_gbps_avg"] = (
-                avg / 1_000_000_000
-            )
+        if name.endswith("_bps"):
+            result[f"{name.removesuffix('_bps')}_gbps_avg"] = avg / 1_000_000_000
+        if name.endswith(".goodput_bps"):
+            result[f"{name.removesuffix('_bps')}_gbps_avg"] = avg / 1_000_000_000
     return result
 
 

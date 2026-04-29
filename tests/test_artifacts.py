@@ -2,6 +2,7 @@ import json
 
 from soak_tester.events import EventWriter, MetricWriter
 from soak_tester.openstack_client.resources import owned_metadata
+from soak_tester.report import _summarize_metrics
 
 
 def test_owned_metadata_contains_required_tags():
@@ -47,3 +48,19 @@ def test_metric_writer_appends_jsonl(tmp_path):
     assert payload["metric"] == "iperf.goodput_bps"
     assert payload["value"] == 9_700_000_000
     assert payload["tags"]["receiver"] == "worker-2"
+
+
+def test_summarize_metrics_adds_gbps_keys_for_bps_metrics():
+    summary = _summarize_metrics(
+        [
+            {"metric": "iperf.goodput_bps", "value": 9_000_000_000},
+            {"metric": "fio.read_bps", "value": 2_000_000_000},
+            {"metric": "fio.write_bps", "value": 1_000_000_000},
+            {"metric": "fio.read_iops", "value": 1000},
+        ]
+    )
+
+    assert summary["iperf.goodput_gbps_avg"] == 9
+    assert summary["fio.read_gbps_avg"] == 2
+    assert summary["fio.write_gbps_avg"] == 1
+    assert summary["fio.read_iops_avg"] == 1000

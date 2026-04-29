@@ -14,6 +14,7 @@ ROOT = Path('/var/lib/soak-tester')
 ROOT.mkdir(parents=True, exist_ok=True)
 HEARTBEATS = ROOT / 'heartbeats.jsonl'
 EVENTS = ROOT / 'events.jsonl'
+METRICS = ROOT / 'metrics.jsonl'
 CONSOLE = Path('/dev/console')
 
 
@@ -37,10 +38,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get('content-length', '0'))
         payload = self.rfile.read(length).decode()
-        target = HEARTBEATS if self.path == '/heartbeat' else EVENTS
+        if self.path == '/heartbeat':
+            records = [payload]
+            target = HEARTBEATS
+            kind = 'heartbeat'
+        elif self.path == '/metrics':
+            parsed = json.loads(payload)
+            items = parsed if isinstance(parsed, list) else [parsed]
+            records = [json.dumps(item) for item in items]
+            target = METRICS
+            kind = 'metric'
+        else:
+            parsed = json.loads(payload)
+            items = parsed if isinstance(parsed, list) else [parsed]
+            records = [json.dumps(item) for item in items]
+            target = EVENTS
+            kind = 'event'
         with target.open('a') as stream:
-            stream.write(payload + '\n')
-        mirror('heartbeat' if self.path == '/heartbeat' else 'event', payload)
+            for record in records:
+                stream.write(record + '\n')
+                mirror(kind, record)
         self._json(200, {'ok': True})
 
     def do_GET(self):
@@ -50,6 +67,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == '/events':
             events = EVENTS.read_text().splitlines()[-200:] if EVENTS.exists() else []
             self._json(200, {'events': [json.loads(x) for x in events if x]})
+        elif self.path == '/metrics':
+            metrics = METRICS.read_text().splitlines()[-1000:] if METRICS.exists() else []
+            self._json(200, {'metrics': [json.loads(x) for x in metrics if x]})
         else:
             self._json(404, {'error': 'not found'})
 

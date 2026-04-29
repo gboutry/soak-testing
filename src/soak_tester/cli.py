@@ -24,6 +24,11 @@ from soak_tester.observability.collect import collect_prometheus, inspect_promet
 from soak_tester.observability.correlate import correlation_report
 from soak_tester.planner import create_plan, default_flavor_specs, write_plan
 from soak_tester.report import generate_final_report
+from soak_tester.run.collect import (
+    collect_controller_artifacts,
+    wait_for_controller,
+    wait_for_worker_heartbeats,
+)
 from soak_tester.run.provision import provision_openstack_run
 from soak_tester.run.status import read_status
 from soak_tester.state import initial_state, load_state, save_state
@@ -156,14 +161,28 @@ def run(
         generate_final_report(run_dir)
         raise
     state.status = "running"
+    if state.controller_url:
+        wait_for_controller(state.controller_url, timeout_seconds=120)
+        wait_for_worker_heartbeats(
+            state.controller_url,
+            expected_worker_ids=_expected_worker_ids(soak_plan),
+            timeout_seconds=300,
+        )
     state.timeline.steady_state_started_at = utcnow_iso()
     save_state(run_dir, state)
     events.write(level="info", plane="control", event="run_started")
-    time.sleep(min(duration_seconds(duration), 60))
+    time.sleep(duration_seconds(duration))
     state.timeline.steady_state_ended_at = utcnow_iso()
     state.timeline.ended_at = utcnow_iso()
     state.status = "left-running" if cfg.run.leave_running else "completed"
     save_state(run_dir, state)
+    if state.controller_url:
+        state.summary["controller_collection"] = collect_controller_artifacts(
+            run_dir,
+            state.controller_url,
+            state.run_id,
+        )
+        save_state(run_dir, state)
     generate_final_report(run_dir)
     if cfg.run.cleanup_on_success and not cfg.run.leave_running:
         cleanup_actions = cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
@@ -266,6 +285,14 @@ def _create_run_dir() -> Path:
     ensure_dir(run_dir / "controller")
     ensure_dir(run_dir / "observability")
     return run_dir
+
+
+def _expected_worker_ids(soak_plan) -> set[str]:
+    worker_ids = {f"compute-{index:03d}" for index in range(soak_plan.compute.worker_count)}
+    worker_ids.update(f"network-receiver-{index:03d}" for index in range(soak_plan.network.receiver_count))
+    worker_ids.update(f"network-sender-{index:03d}" for index in range(soak_plan.network.sender_count))
+    worker_ids.update(f"storage-{index:03d}" for index in range(soak_plan.storage.worker_count))
+    return worker_ids
 
 
 def _write_run_config(run_dir: Path, source: Path, cfg: object) -> None:
