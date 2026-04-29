@@ -2,7 +2,7 @@ import json
 
 from soak_tester.events import EventWriter, MetricWriter
 from soak_tester.openstack_client.resources import owned_metadata
-from soak_tester.report import _summarize_metrics
+from soak_tester.report import _summarize_metrics, render_markdown_report
 
 
 def test_owned_metadata_contains_required_tags():
@@ -64,3 +64,80 @@ def test_summarize_metrics_adds_gbps_keys_for_bps_metrics():
     assert summary["fio.read_gbps_avg"] == 2
     assert summary["fio.write_gbps_avg"] == 1
     assert summary["fio.read_iops_avg"] == 1000
+
+
+def test_summarize_metrics_sums_per_worker_series_averages():
+    summary = _summarize_metrics(
+        [
+            {
+                "metric": "iperf.goodput_bps",
+                "worker_id": "sender-0",
+                "value": 2_000_000_000,
+                "tags": {"receiver": "receiver-0"},
+            },
+            {
+                "metric": "iperf.goodput_bps",
+                "worker_id": "sender-0",
+                "value": 4_000_000_000,
+                "tags": {"receiver": "receiver-0"},
+            },
+            {
+                "metric": "iperf.goodput_bps",
+                "worker_id": "sender-1",
+                "value": 5_000_000_000,
+                "tags": {"receiver": "receiver-1"},
+            },
+        ]
+    )
+
+    assert summary["iperf.goodput_gbps_avg"] == 8
+
+
+def test_summarize_metrics_treats_repeated_flow_files_as_one_series():
+    summary = _summarize_metrics(
+        [
+            {
+                "metric": "iperf.goodput_bps",
+                "worker_id": "sender-0",
+                "value": 2_000_000_000,
+                "tags": {"receiver": "receiver-0", "flow_file": "iperf3-00000.json"},
+            },
+            {
+                "metric": "iperf.goodput_bps",
+                "worker_id": "sender-0",
+                "value": 4_000_000_000,
+                "tags": {"receiver": "receiver-0", "flow_file": "iperf3-00001.json"},
+            },
+        ]
+    )
+
+    assert summary["iperf.goodput_gbps_avg"] == 3
+
+
+def test_render_markdown_report_includes_api_details():
+    markdown = render_markdown_report(
+        {
+            "run_id": "soak-1",
+            "status": "completed",
+            "target_percent": 25,
+            "requested": {
+                "compute_vcpus": 0,
+                "network_gbps": 0,
+                "storage_read_gbps": 0,
+                "storage_write_gbps": 0,
+                "api_ops_per_second": 10,
+            },
+            "achieved": {
+                "api.ops_per_second_avg": 9,
+                "api.success_ops_per_second_avg": 8,
+                "api.errors_avg": 1,
+                "api.error_rate_avg": 0.1,
+                "api.latency_p95_ms_avg": 12,
+                "api.latency_p99_ms_avg": 20,
+            },
+        }
+    )
+
+    assert "API achieved avg: 9 ops/s" in markdown
+    assert "API success avg: 8 ops/s" in markdown
+    assert "API latency p95: 12 ms" in markdown

@@ -13,8 +13,12 @@ def worker_cloud_init(
     controller_url: str,
     duration_seconds: int,
     peers: list[str] | None = None,
+    flow_assignments: list[dict[str, object]] | None = None,
+    receiver_ports: list[int] | None = None,
 ) -> str:
     peers = peers or []
+    flow_assignments = flow_assignments or []
+    receiver_ports = receiver_ports or []
     script = f"""#!/bin/bash
 set -eux
 mkdir -p /var/log/soak-tester
@@ -31,6 +35,8 @@ WORKER_ID = {json.dumps(worker_id)}
 CONTROLLER = {json.dumps(controller_url)}
 DURATION = {duration_seconds}
 PEERS = {json.dumps(peers)}
+FLOW_ASSIGNMENTS = {json.dumps(flow_assignments)}
+RECEIVER_PORTS = {json.dumps(receiver_ports)}
 CPU_LOAD = {config.workloads.compute.cpu_load_percent}
 MEMORY_LOAD = {config.workloads.compute.memory_load_percent}
 FLOW_TIME = {int(config.workloads.network.flow_duration.rstrip("smhd"))}
@@ -40,6 +46,7 @@ IODEPTH = {config.workloads.storage.iodepth}
 NUMJOBS = {config.workloads.storage.numjobs}
 BLOCK_SIZE = {json.dumps(config.workloads.storage.block_size)}
 RWMIXREAD = {config.workloads.storage.rwmixread}
+SERVER_PROCS = []
 
 
 def post(path, payload):
@@ -102,15 +109,16 @@ def start_workload():
         return subprocess.Popen(['sh', '-c', 'yes >/dev/null'])
     if ROLE == 'network-receiver':
         if has_command('iperf3'):
-            return subprocess.Popen(['iperf3', '--server'])
+            ports = RECEIVER_PORTS or [5201]
+            for port in ports:
+                SERVER_PROCS.append(subprocess.Popen(
+                    ['iperf3', '--server', '--port', str(port)],
+                    stdout=open('/var/log/soak-tester/iperf3-server-' + str(port) + '.log', 'a'),
+                    stderr=subprocess.STDOUT,
+                ))
+            return None
         return None
-    if ROLE == 'network-sender' and PEERS:
-        if has_command('iperf3'):
-            flow_time = min(FLOW_TIME, DURATION)
-            return subprocess.Popen([
-                'iperf3', '--client', PEERS[0], '--time', str(flow_time),
-                '--parallel', str(PARALLEL), '--bitrate', BITRATE, '--json',
-            ], stdout=open('/var/log/soak-tester/iperf3.json', 'a'), stderr=subprocess.STDOUT)
+    if ROLE == 'network-sender' and (FLOW_ASSIGNMENTS or PEERS):
         return None
     if ROLE == 'storage':
         if not has_command('fio'):
@@ -127,26 +135,51 @@ def start_workload():
 
 
 def parse_iperf3_output():
-    path = '/var/log/soak-tester/iperf3.json'
-    if not os.path.exists(path):
+    flow_by_id = {{flow.get('flow_id'): flow for flow in FLOW_ASSIGNMENTS}}
+    paths = [
+        '/var/log/soak-tester/' + name
+        for name in sorted(os.listdir('/var/log/soak-tester'))
+        if name.startswith('iperf3-') and name.endswith('.json')
+    ]
+    if not paths:
         return
-    try:
-        data = json.load(open(path))
-        end = data.get('end', {{}})
-        received = end.get('sum_received') or {{}}
-        sent = end.get('sum_sent') or {{}}
-        goodput = received.get('bits_per_second') or sent.get('bits_per_second')
-        retransmits = sent.get('retransmits')
-        metrics = []
-        tags = {{'receiver': PEERS[0] if PEERS else ''}}
-        if goodput is not None:
-            metrics.append(metric('network', 'iperf.goodput_bps', float(goodput), 'bps', tags))
-        if retransmits is not None:
-            metrics.append(metric('network', 'iperf.retransmits', float(retransmits), 'count', tags))
-        post_many('/metrics', metrics)
-        post('/events', event('info', 'network', 'iperf_completed', {{'metrics': len(metrics)}}))
-    except Exception as exc:
-        post('/events', event('warning', 'network', 'iperf_parse_failed', {{'error': str(exc)}}))
+    parsed = 0
+    for path in paths:
+        try:
+            data = json.load(open(path))
+            flow_id = os.path.basename(path).split('-attempt-', 1)[0].replace('iperf3-', '')
+            flow = flow_by_id.get(flow_id) or {{}}
+            receiver = flow.get('receiver_worker_id') or (PEERS[0] if PEERS else '')
+            tags = {{
+                'receiver': str(receiver),
+                'receiver_ip': str(flow.get('receiver_private_ip') or (PEERS[0] if PEERS else '')),
+                'receiver_port': str(flow.get('receiver_port') or ''),
+                'flow_id': str(flow.get('flow_id') or flow_id),
+                'source_host': str(flow.get('source_host') or ''),
+                'dest_host': str(flow.get('dest_host') or ''),
+            }}
+            if data.get('error'):
+                metrics = [metric('network', 'iperf.flow_failed', 1, 'count', tags)]
+                post_many('/metrics', metrics)
+                post('/events', event('warning', 'network', 'iperf_failed', {{'error': data.get('error'), **tags}}))
+                parsed += len(metrics)
+                continue
+            end = data.get('end', {{}})
+            received = end.get('sum_received') or {{}}
+            sent = end.get('sum_sent') or {{}}
+            goodput = received.get('bits_per_second') or sent.get('bits_per_second')
+            retransmits = sent.get('retransmits')
+            metrics = []
+            tags['flow_file'] = os.path.basename(path)
+            if goodput is not None:
+                metrics.append(metric('network', 'iperf.goodput_bps', float(goodput), 'bps', tags))
+            if retransmits is not None:
+                metrics.append(metric('network', 'iperf.retransmits', float(retransmits), 'count', tags))
+            post_many('/metrics', metrics)
+            parsed += len(metrics)
+        except Exception as exc:
+            post('/events', event('warning', 'network', 'iperf_parse_failed', {{'path': path, 'error': str(exc)}}))
+    post('/events', event('info', 'network', 'iperf_completed', {{'metrics': parsed, 'flows': len(paths)}}))
 
 
 def _max_percentile(jobs, op, percentile):
@@ -184,16 +217,59 @@ def parse_fio_output():
         post('/events', event('warning', 'storage', 'fio_parse_failed', {{'error': str(exc)}}))
 
 
-proc = start_workload()
 end = time.time() + DURATION
+proc = start_workload()
+flow_index = 0
+flow_procs = {{}}
+flow_attempts = {{}}
 while time.time() < end:
+    if ROLE == 'network-sender' and has_command('iperf3'):
+        assignments = FLOW_ASSIGNMENTS or [
+            {{
+                'flow_id': 'legacy-flow-00000',
+                'receiver_private_ip': PEERS[0] if PEERS else '',
+                'receiver_port': 5201,
+                'target_gbps': float(BITRATE.rstrip('G')),
+                'parallel_streams': PARALLEL,
+            }}
+        ]
+        for flow in assignments:
+            flow_id = str(flow.get('flow_id'))
+            active = flow_procs.get(flow_id)
+            if active is not None and active.poll() is None:
+                continue
+            remaining = int(end - time.time())
+            if remaining > 1:
+                flow_time = max(1, min(FLOW_TIME, remaining))
+                attempt = flow_attempts.get(flow_id, 0)
+                path = '/var/log/soak-tester/iperf3-' + flow_id + '-attempt-' + str(attempt).zfill(5) + '.json'
+                receiver_ip = str(flow.get('receiver_private_ip') or '')
+                if not receiver_ip:
+                    continue
+                flow_procs[flow_id] = subprocess.Popen([
+                    'iperf3', '--client', receiver_ip,
+                    '--port', str(flow.get('receiver_port') or 5201),
+                    '--time', str(flow_time),
+                    '--parallel', str(flow.get('parallel_streams') or PARALLEL),
+                    '--bitrate', str(flow.get('target_gbps') or BITRATE.rstrip('G')) + 'G',
+                    '--json',
+                ], stdout=open(path, 'w'), stderr=subprocess.STDOUT)
+                flow_attempts[flow_id] = attempt + 1
+                flow_index += 1
+    running_flows = sum(1 for item in flow_procs.values() if item.poll() is None)
     post('/heartbeat', {{
         'worker_id': WORKER_ID,
         'role': ROLE,
-        'status': None if proc is None else proc.poll(),
+        'status': running_flows if ROLE == 'network-sender' else (None if proc is None else proc.poll()),
         'ts': time.time(),
     }})
     time.sleep(5)
+for active in flow_procs.values():
+    if active.poll() is None:
+        try:
+            active.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            active.terminate()
 if proc is not None and proc.poll() is None and ROLE not in ('network-receiver',):
     try:
         proc.wait(timeout=10)
@@ -205,6 +281,9 @@ if ROLE == 'storage':
     parse_fio_output()
 if proc is not None and proc.poll() is None:
     proc.terminate()
+for active in SERVER_PROCS:
+    if active.poll() is None:
+        active.terminate()
 post('/heartbeat', {{
     'worker_id': WORKER_ID,
     'role': ROLE,

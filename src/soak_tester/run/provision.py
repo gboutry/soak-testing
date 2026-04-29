@@ -339,8 +339,10 @@ def provision_openstack_run(
 
     duration_s = duration_seconds(duration)
     receiver_ips: list[str] = []
+    receiver_ip_by_worker_id: dict[str, str] = {}
     receiver_servers = []
     for index in range(plan.network.receiver_count):
+        worker_id = f"network-receiver-{index:03d}"
         server = _create_worker(
             project_conn,
             tracker,
@@ -357,12 +359,20 @@ def provision_openstack_run(
             index,
             controller_url,
             duration_s,
+            receiver_ports=[
+                flow.receiver_port
+                for flow in plan.network.flow_assignments
+                if flow.receiver_worker_id == worker_id
+            ],
+            planned_host=plan.network.receiver_worker_hosts.get(worker_id),
         )
         receiver_servers.append(server)
         if ip := server_private_ip(server):
             receiver_ips.append(ip)
+            receiver_ip_by_worker_id[worker_id] = ip
 
     for index in range(plan.network.sender_count):
+        worker_id = f"network-sender-{index:03d}"
         _create_worker(
             project_conn,
             tracker,
@@ -380,26 +390,42 @@ def provision_openstack_run(
             controller_url,
             duration_s,
             peers=receiver_ips,
+            flow_assignments=[
+                {
+                    **flow.model_dump(mode="json"),
+                    "receiver_private_ip": receiver_ip_by_worker_id.get(flow.receiver_worker_id),
+                }
+                for flow in plan.network.flow_assignments
+                if flow.sender_worker_id == worker_id
+            ],
+            planned_host=plan.network.sender_worker_hosts.get(worker_id),
         )
 
-    for index in range(plan.compute.worker_count):
-        _create_worker(
-            project_conn,
-            tracker,
-            placement,
-            run_id,
-            project_name,
-            config,
-            image.id,
-            network.id,
-            security_group.name,
-            keypair.name,
-            "compute",
-            "compute",
-            index,
-            controller_url,
-            duration_s,
-        )
+    compute_index = 0
+    compute_groups = plan.compute.worker_groups or [
+        {"flavor": config.flavors.compute_worker, "count": plan.compute.worker_count}
+    ]
+    for group in compute_groups:
+        for _ in range(int(group["count"])):
+            _create_worker(
+                project_conn,
+                tracker,
+                placement,
+                run_id,
+                project_name,
+                config,
+                image.id,
+                network.id,
+                security_group.name,
+                keypair.name,
+                "compute",
+                "compute",
+                compute_index,
+                controller_url,
+                duration_s,
+                flavor_name_override=str(group["flavor"]),
+            )
+            compute_index += 1
 
     for index in range(plan.storage.worker_count):
         worker = _create_worker(
@@ -462,6 +488,10 @@ def _create_worker(
     controller_url: str,
     duration_seconds_value: int,
     peers: list[str] | None = None,
+    flow_assignments: list[dict[str, Any]] | None = None,
+    receiver_ports: list[int] | None = None,
+    planned_host: str | None = None,
+    flavor_name_override: str | None = None,
 ) -> Any:
     worker_id = f"{role}-{index:03d}"
     metadata = owned_metadata(run_id, plane, "worker", project_name)
@@ -471,6 +501,7 @@ def _create_worker(
         "storage": config.flavors.storage_worker,
         "api": config.flavors.api_worker,
     }[plane]
+    flavor_name = flavor_name_override or flavor_name
     server = _boot_server(
         conn,
         name=f"{project_name}-{worker_id}",
@@ -486,8 +517,11 @@ def _create_worker(
             controller_url=controller_url,
             duration_seconds=duration_seconds_value,
             peers=peers,
+            flow_assignments=flow_assignments,
+            receiver_ports=receiver_ports,
         ),
         metadata=metadata,
+        availability_zone=_availability_zone_for_host(planned_host),
     )
     tracker.add(
         resource_record(
@@ -515,18 +549,28 @@ def _boot_server(
     key_name: str,
     user_data: str,
     metadata: dict[str, str],
+    availability_zone: str | None = None,
 ) -> Any:
     flavor = conn.compute.find_flavor(flavor_name)
-    return conn.compute.create_server(
-        name=name,
-        image_id=image_id,
-        flavor_id=flavor.id,
-        networks=[{"uuid": network_id}],
-        security_groups=[{"name": security_group_name}],
-        key_name=key_name,
-        user_data=base64.b64encode(user_data.encode()).decode(),
-        metadata=metadata,
-    )
+    payload = {
+        "name": name,
+        "image_id": image_id,
+        "flavor_id": flavor.id,
+        "networks": [{"uuid": network_id}],
+        "security_groups": [{"name": security_group_name}],
+        "key_name": key_name,
+        "user_data": base64.b64encode(user_data.encode()).decode(),
+        "metadata": metadata,
+    }
+    if availability_zone:
+        payload["availability_zone"] = availability_zone
+    return conn.compute.create_server(**payload)
+
+
+def _availability_zone_for_host(host: str | None) -> str | None:
+    if not host or host.startswith("host-"):
+        return None
+    return f"nova:{host}"
 
 
 def _server_port(conn: Any, server_id: str) -> Any:

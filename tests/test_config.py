@@ -18,6 +18,81 @@ def test_load_config_accepts_example_schema():
     assert config.observability.prometheus.query_packs == ["node-exporter-network"]
 
 
+def test_api_operation_mix_rejects_unknown_operations(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+workloads:
+  api:
+    operation_mix:
+      list_servers: 1
+      delete_everything: 1
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported API operations"):
+        load_config(path)
+
+
+def test_api_operation_mix_rejects_non_positive_weights(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+workloads:
+  api:
+    operation_mix:
+      list_servers: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        load_config(path)
+
+
 @pytest.mark.parametrize(
     ("text", "seconds"),
     [("30s", 30), ("5m", 300), ("8h", 28800), ("1d", 86400)],

@@ -72,6 +72,11 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         f"- fio read IOPS avg: {achieved.get('fio.read_iops_avg', 0)}",
         f"- fio write IOPS avg: {achieved.get('fio.write_iops_avg', 0)}",
         f"- API achieved avg: {achieved.get('api.ops_per_second_avg', 0)} ops/s",
+        f"- API success avg: {achieved.get('api.success_ops_per_second_avg', 0)} ops/s",
+        f"- API errors: {achieved.get('api.errors_avg', 0)}",
+        f"- API error rate: {achieved.get('api.error_rate_avg', 0)}",
+        f"- API latency p95: {achieved.get('api.latency_p95_ms_avg', 0)} ms",
+        f"- API latency p99: {achieved.get('api.latency_p99_ms_avg', 0)} ms",
         "",
         "## Conclusion",
         "",
@@ -92,17 +97,27 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _summarize_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
     result: dict[str, float] = {}
-    grouped: dict[str, list[float]] = {}
+    grouped: dict[str, dict[str, list[float]]] = {}
     for metric in metrics:
-        grouped.setdefault(metric["metric"], []).append(float(metric["value"]))
-    for name, values in grouped.items():
-        avg = sum(values) / len(values)
-        result[f"{name}_avg"] = avg
+        grouped.setdefault(metric["metric"], {}).setdefault(_metric_series_key(metric), []).append(
+            float(metric["value"])
+        )
+    for name, series in grouped.items():
+        series_avgs = [sum(values) / len(values) for values in series.values()]
+        aggregate_avg = sum(series_avgs)
+        result[f"{name}_avg"] = aggregate_avg
         if name.endswith("_bps"):
-            result[f"{name.removesuffix('_bps')}_gbps_avg"] = avg / 1_000_000_000
+            result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
         if name.endswith(".goodput_bps"):
-            result[f"{name.removesuffix('_bps')}_gbps_avg"] = avg / 1_000_000_000
+            result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
     return result
+
+
+def _metric_series_key(metric: dict[str, Any]) -> str:
+    tags = dict(metric.get("tags") or {})
+    tags.pop("flow_file", None)
+    stable_tags = json.dumps(tags, sort_keys=True, separators=(",", ":"))
+    return f"{metric.get('worker_id', '')}:{stable_tags}"
 
 
 def _count_events(run_dir: Path, event_name: str) -> int:

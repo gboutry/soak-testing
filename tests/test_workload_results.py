@@ -38,6 +38,41 @@ def test_parse_iperf3_metrics_prefers_receiver_goodput_and_records_retransmits()
     ]
 
 
+def test_parse_iperf3_metrics_preserves_flow_tags_and_error_payloads():
+    payload = {"error": "the server is busy running a test. try again later"}
+
+    metrics, events = parse_iperf3_metrics(
+        json.dumps(payload),
+        worker_id="network-sender-000",
+        receiver="network-receiver-001",
+        tags={
+            "flow_id": "network-flow-00001",
+            "receiver_port": "5202",
+            "source_host": "host-000",
+            "dest_host": "host-001",
+        },
+    )
+
+    assert metrics == [
+        {
+            "plane": "network",
+            "worker_id": "network-sender-000",
+            "metric": "iperf.flow_failed",
+            "value": 1,
+            "unit": "count",
+            "tags": {
+                "receiver": "network-receiver-001",
+                "flow_id": "network-flow-00001",
+                "receiver_port": "5202",
+                "source_host": "host-000",
+                "dest_host": "host-001",
+            },
+        }
+    ]
+    assert events[0]["event"] == "iperf_failed"
+    assert "server is busy" in events[0]["details"]["error"]
+
+
 def test_parse_iperf3_metrics_reports_parse_error_event():
     metrics, events = parse_iperf3_metrics("not-json", worker_id="sender", receiver="receiver")
 

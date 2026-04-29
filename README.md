@@ -30,10 +30,38 @@ provider networks, Ceph pools, Prometheus, or Grafana.
 soak-tester inspect --os-cloud admin --config config.yaml
 soak-tester plan --os-cloud admin --config config.yaml --target 80
 soak-tester run --os-cloud admin --config config.yaml --target 80 --duration 8h
+soak-tester calibrate network --os-cloud admin --config config.yaml --duration 10m
 soak-tester status --run runs/soak-20260429-143000
 soak-tester cleanup --run runs/soak-20260429-143000 --dry-run
 soak-tester observability collect --run runs/soak-20260429-143000
 ```
+
+## Capacity Model
+
+Compute, network, storage, and API load are planned as separate domains and can
+run at the same time. Compute workers are sized from requested vCPU/RAM. Storage
+workers are sized from configured fio worker count and reported against
+read/write/IOPS targets. Network can use either an aggregate target or a
+host-aware full mesh:
+
+```yaml
+capacity:
+  network:
+    gbps: 200
+    scope: per_host
+    per_host_gbps: 200
+
+workloads:
+  network:
+    topology: full_mesh
+    target_gbps_per_flow: 5
+    sender_worker_target_gbps: 20
+    receiver_worker_target_gbps: 20
+```
+
+With `scope: per_host`, `--target 80` means `160 Gbit/s` per selected compute
+host. If host names are not listed in config, `soak-tester` tries to discover
+enabled hypervisors with admin Nova credentials and records them in the plan.
 
 ## Artifact Layout
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import time
 from pathlib import Path
 from typing import Annotated
@@ -13,7 +12,7 @@ from rich.table import Table
 from soak_tester.cleanup import cleanup_run
 from soak_tester.config import dump_config, load_config
 from soak_tester.events import EventWriter, MetricWriter
-from soak_tester.openstack_client.compute import require_flavor
+from soak_tester.openstack_client.compute import list_hypervisor_names, require_flavor
 from soak_tester.openstack_client.connection import admin_connection
 from soak_tester.openstack_client.identity import get_role
 from soak_tester.openstack_client.image import require_image
@@ -33,11 +32,14 @@ from soak_tester.run.provision import provision_openstack_run
 from soak_tester.run.status import read_status
 from soak_tester.state import initial_state, load_state, save_state
 from soak_tester.util import duration_seconds, ensure_dir, make_run_id, utcnow_iso
+from soak_tester.workloads.api import ApiWorkload
 
 console = Console()
 app = typer.Typer(help="OpenStack-native soak-load testing tool.")
 observability_app = typer.Typer(help="Prometheus evidence commands.")
+calibrate_app = typer.Typer(help="Calibration commands.")
 app.add_typer(observability_app, name="observability")
+app.add_typer(calibrate_app, name="calibrate")
 
 
 def main() -> None:
@@ -81,16 +83,17 @@ def plan(
     """Generate a run plan artifact without provisioning resources."""
     run_dir = _create_run_dir()
     cfg = load_config(config)
-    _write_run_config(run_dir, config, cfg)
     state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=None)
     save_state(run_dir, state)
     try:
         conn = admin_connection(os_cloud)
-        flavor_specs = {name: require_flavor(conn, name) for name in set(cfg.flavors.model_dump().values())}
+        _prepare_openstack_context(conn, cfg)
+        flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
     except Exception as exc:
         console.print(f"[yellow]OpenStack flavor lookup unavailable, using 1 vCPU/1 GiB defaults: {exc}[/yellow]")
         flavor_specs = default_flavor_specs(cfg)
     soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
+    _write_run_config(run_dir, config, cfg)
     write_plan(run_dir / "plan.yaml", soak_plan)
     EventWriter(run_dir / "events.jsonl", run_dir.name).write(
         level="info", plane="control", event="plan_created"
@@ -109,20 +112,21 @@ def run(
     """Create artifacts and run the MVP OpenStack soak workflow."""
     run_dir = _create_run_dir()
     cfg = load_config(config)
-    _write_run_config(run_dir, config, cfg)
     state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=duration)
     state.failure_budget_remaining = cfg.run.failure_budget
     state.project_name = f"{cfg.resources.project_prefix}-{run_dir.name}"
     save_state(run_dir, state)
     events = EventWriter(run_dir / "events.jsonl", run_dir.name)
-    MetricWriter(run_dir / "metrics.jsonl", run_dir.name)
+    metrics = MetricWriter(run_dir / "metrics.jsonl", run_dir.name)
     flavor_specs = default_flavor_specs(cfg)
     try:
         conn = admin_connection(os_cloud)
-        flavor_specs = {name: require_flavor(conn, name) for name in set(cfg.flavors.model_dump().values())}
+        _prepare_openstack_context(conn, cfg)
+        flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
     except Exception as exc:
         events.write(level="warning", plane="control", event="openstack_lookup_unavailable", details={"error": str(exc)})
     soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
+    _write_run_config(run_dir, config, cfg)
     write_plan(run_dir / "plan.yaml", soak_plan)
     state.status = "provisioning"
     state.timeline.provisioning_started_at = utcnow_iso()
@@ -171,7 +175,23 @@ def run(
     state.timeline.steady_state_started_at = utcnow_iso()
     save_state(run_dir, state)
     events.write(level="info", plane="control", event="run_started")
-    time.sleep(duration_seconds(duration))
+    duration_s = duration_seconds(duration)
+    if cfg.workloads.api.enabled and soak_plan.api.target_ops_per_second > 0:
+        ApiWorkload(
+            conn=provision_result["project_conn"],
+            operation_mix=cfg.workloads.api.operation_mix,
+            target_ops_per_second=soak_plan.api.target_ops_per_second,
+            duration_seconds=duration_s,
+            run_id=run_dir.name,
+            project_name=state.project_name,
+            network_id=_run_network_id(provision_result["tracker"]),
+            metric_writer=metrics,
+            event_writer=events,
+            tracker=provision_result["tracker"],
+            create_delete_volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
+        ).run()
+    else:
+        time.sleep(duration_s)
     state.timeline.steady_state_ended_at = utcnow_iso()
     state.timeline.ended_at = utcnow_iso()
     state.status = "left-running" if cfg.run.leave_running else "completed"
@@ -278,6 +298,82 @@ def observability_report(run: Annotated[Path, typer.Option("--run", exists=True)
     console.print(json.dumps(correlation_report(run), indent=2))
 
 
+@calibrate_app.command("network")
+def calibrate_network(
+    os_cloud: Annotated[str, typer.Option("--os-cloud")],
+    config: Annotated[Path, typer.Option("--config", exists=True)],
+    duration: Annotated[str, typer.Option("--duration")] = "10m",
+    target: Annotated[float, typer.Option("--target", min=1, max=100)] = 100,
+) -> None:
+    """Run a network-only calibration and write run artifacts."""
+    run_dir = _create_run_dir()
+    cfg = load_config(config)
+    cfg.workloads.compute.enabled = False
+    cfg.workloads.storage.enabled = False
+    cfg.workloads.api.enabled = False
+    cfg.run.leave_running = False
+    cfg.run.cleanup_on_success = True
+    state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=duration)
+    state.project_name = f"{cfg.resources.project_prefix}-{run_dir.name}"
+    state.summary["calibration"] = "network"
+    save_state(run_dir, state)
+    events = EventWriter(run_dir / "events.jsonl", run_dir.name)
+    conn = admin_connection(os_cloud)
+    _prepare_openstack_context(conn, cfg)
+    flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
+    soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
+    _write_run_config(run_dir, config, cfg)
+    write_plan(run_dir / "plan.yaml", soak_plan)
+    state.status = "provisioning"
+    state.timeline.provisioning_started_at = utcnow_iso()
+    save_state(run_dir, state)
+    provision_result = provision_openstack_run(
+        run_dir=run_dir,
+        run_id=run_dir.name,
+        project_name=state.project_name,
+        config=cfg,
+        plan=soak_plan,
+        admin_conn=conn,
+        duration=duration,
+    )
+    state.controller_url = provision_result["controller_url"]
+    state.status = "running"
+    state.timeline.steady_state_started_at = utcnow_iso()
+    save_state(run_dir, state)
+    if state.controller_url:
+        wait_for_controller(state.controller_url, timeout_seconds=120)
+        wait_for_worker_heartbeats(
+            state.controller_url,
+            expected_worker_ids=_expected_worker_ids(soak_plan),
+            timeout_seconds=300,
+        )
+    events.write(level="info", plane="network", event="network_calibration_started")
+    time.sleep(duration_seconds(duration))
+    if state.controller_url:
+        state.summary["controller_collection"] = collect_controller_artifacts(
+            run_dir,
+            state.controller_url,
+            state.run_id,
+        )
+    state.timeline.steady_state_ended_at = utcnow_iso()
+    state.timeline.ended_at = utcnow_iso()
+    state.status = "completed"
+    save_state(run_dir, state)
+    report = generate_final_report(run_dir)
+    calibration = {
+        "run_id": run_dir.name,
+        "target_percent": target,
+        "duration": duration,
+        "planned_network": soak_plan.network.model_dump(mode="json"),
+        "achieved": report.get("achieved", {}),
+        "note": "Calibration is workload-observed guest iperf evidence, not physical fabric proof.",
+    }
+    (run_dir / "network-calibration.json").write_text(json.dumps(calibration, indent=2), encoding="utf-8")
+    if cfg.run.cleanup_on_success:
+        cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
+    console.print(f"Network calibration artifacts written to {run_dir}")
+
+
 def _create_run_dir() -> Path:
     run_dir = Path("runs") / make_run_id()
     ensure_dir(run_dir)
@@ -295,11 +391,33 @@ def _expected_worker_ids(soak_plan) -> set[str]:
     return worker_ids
 
 
+def _required_flavor_names(cfg) -> set[str]:
+    names = set(cfg.flavors.model_dump().values())
+    names.update(cfg.workloads.compute.flavor_mix)
+    return names
+
+
+def _run_network_id(tracker) -> str:
+    for resource in tracker.resources:
+        if resource.get("type") == "network":
+            return resource["id"]
+    raise RuntimeError("run network id not found")
+
+
 def _write_run_config(run_dir: Path, source: Path, cfg: object) -> None:
-    if source.exists():
-        shutil.copyfile(source, run_dir / "config.yaml")
-    else:
-        (run_dir / "config.yaml").write_text(dump_config(cfg), encoding="utf-8")
+    del source
+    (run_dir / "config.yaml").write_text(dump_config(cfg), encoding="utf-8")
+
+
+def _prepare_openstack_context(conn: object, cfg: object) -> None:
+    network = cfg.capacity.network
+    workload = cfg.workloads.network
+    if network.scope != "per_host" or workload.hosts:
+        return
+    hosts = list_hypervisor_names(conn)
+    if hosts:
+        workload.hosts = hosts
+        workload.host_count = len(hosts)
 
 
 def _print_checks(checks: list[tuple[str, str]]) -> None:

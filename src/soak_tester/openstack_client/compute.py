@@ -38,3 +38,34 @@ def placement_record(worker_id: str, server: Any, *, plane: str, role: str) -> d
         or getattr(server, "OS-EXT-SRV-ATTR:hypervisor_hostname", None),
         "host": getattr(server, "host", None) or getattr(server, "OS-EXT-SRV-ATTR:host", None),
     }
+
+
+def list_hypervisor_names(conn: Any) -> list[str]:
+    try:
+        hypervisors = conn.compute.hypervisors(details=True)
+    except TypeError:
+        hypervisors = conn.compute.hypervisors()
+    names: list[str] = []
+    for hypervisor in hypervisors:
+        state = _resource_value(hypervisor, "state")
+        status = _resource_value(hypervisor, "status")
+        if state and str(state).lower() != "up":
+            continue
+        if status and str(status).lower() != "enabled":
+            continue
+        name = (
+            _resource_value(hypervisor, "hypervisor_hostname")
+            or _resource_value(hypervisor, "name")
+        )
+        if name:
+            names.append(str(name))
+    return sorted(set(names))
+
+
+def _resource_value(resource: Any, key: str) -> Any:
+    value = getattr(resource, key, None)
+    if value is not None:
+        return value
+    if hasattr(resource, "get"):
+        return resource.get(key)
+    return None

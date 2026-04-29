@@ -55,6 +55,8 @@ class ComputeCapacity(BaseModel):
 
 class NetworkCapacity(BaseModel):
     gbps: float
+    scope: Literal["aggregate", "per_host"] = "aggregate"
+    per_host_gbps: float | None = None
 
 
 class StorageCapacity(BaseModel):
@@ -80,20 +82,49 @@ class ApiWorkloadConfig(BaseModel):
     operation_mix: dict[str, int] = Field(default_factory=dict)
     create_delete_volume_size_gib: int = 1
 
+    @field_validator("operation_mix")
+    @classmethod
+    def validate_operation_mix(cls, value: dict[str, int]) -> dict[str, int]:
+        allowed = {
+            "list_servers",
+            "list_ports",
+            "list_volumes",
+            "show_server",
+            "show_volume",
+            "create_delete_ports",
+            "create_delete_volumes",
+        }
+        unsupported = sorted(set(value) - allowed)
+        if unsupported:
+            raise ValueError(f"unsupported API operations: {', '.join(unsupported)}")
+        non_positive = [name for name, weight in value.items() if not isinstance(weight, int) or weight <= 0]
+        if non_positive:
+            raise ValueError("API operation weights must be positive integer values")
+        return value
+
 
 class ComputeWorkloadConfig(BaseModel):
     enabled: bool = True
     cpu_load_percent: int = 95
     memory_load_percent: int = 70
+    flavor_mix: list[str] = Field(default_factory=list)
 
 
 class NetworkWorkloadConfig(BaseModel):
     enabled: bool = True
     protocol: Literal["tcp"] = "tcp"
     tool: Literal["iperf3"] = "iperf3"
+    topology: Literal["paired", "full_mesh"] = "paired"
     flow_duration: str = "60s"
     parallel_streams_per_flow: int = 4
     target_gbps_per_flow: float = 10
+    sender_worker_target_gbps: float = 10
+    receiver_worker_target_gbps: float = 10
+    hosts: list[str] | None = None
+    host_count: int | None = None
+    receiver_port_base: int = 5201
+    max_flows: int = 10000
+    max_workers: int = 1000
 
     @field_validator("flow_duration")
     @classmethod

@@ -9,9 +9,16 @@ def parse_iperf3_metrics(
     *,
     worker_id: str,
     receiver: str,
+    tags: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     try:
         payload = json.loads(text)
+        error = payload.get("error")
+        metric_tags = {"receiver": receiver, **(tags or {})}
+        if error:
+            return [
+                _metric("network", worker_id, "iperf.flow_failed", 1, "count", metric_tags)
+            ], [_event("network", worker_id, "iperf_failed", {"error": str(error), **metric_tags})]
         end = payload.get("end", {})
         sum_received = end.get("sum_received") or {}
         sum_sent = end.get("sum_sent") or {}
@@ -23,13 +30,12 @@ def parse_iperf3_metrics(
     if goodput is None:
         return [], [_event("network", worker_id, "iperf_missing_goodput", {})]
 
-    tags = {"receiver": receiver}
     metrics = [
-        _metric("network", worker_id, "iperf.goodput_bps", float(goodput), "bps", tags),
+        _metric("network", worker_id, "iperf.goodput_bps", float(goodput), "bps", metric_tags),
     ]
     if retransmits is not None:
         metrics.append(
-            _metric("network", worker_id, "iperf.retransmits", float(retransmits), "count", tags)
+            _metric("network", worker_id, "iperf.retransmits", float(retransmits), "count", metric_tags)
         )
     return metrics, []
 
