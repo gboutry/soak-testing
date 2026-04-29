@@ -14,6 +14,7 @@ class OpenStackConfig(BaseModel):
     image: str
     ssh_user: str = "ubuntu"
     member_role: str = "member"
+    admin_role: str = "admin"
     user_domain_name: str = "Default"
     project_domain_name: str = "Default"
 

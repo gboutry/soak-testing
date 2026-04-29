@@ -47,6 +47,7 @@ NUMJOBS = {config.workloads.storage.numjobs}
 BLOCK_SIZE = {json.dumps(config.workloads.storage.block_size)}
 RWMIXREAD = {config.workloads.storage.rwmixread}
 SERVER_PROCS = []
+PARSED_IPERF_FILES = set()
 
 
 def post(path, payload):
@@ -145,6 +146,8 @@ def parse_iperf3_output():
         return
     parsed = 0
     for path in paths:
+        if path in PARSED_IPERF_FILES:
+            continue
         try:
             data = json.load(open(path))
             flow_id = os.path.basename(path).split('-attempt-', 1)[0].replace('iperf3-', '')
@@ -177,9 +180,11 @@ def parse_iperf3_output():
                 metrics.append(metric('network', 'iperf.retransmits', float(retransmits), 'count', tags))
             post_many('/metrics', metrics)
             parsed += len(metrics)
+            PARSED_IPERF_FILES.add(path)
         except Exception as exc:
             post('/events', event('warning', 'network', 'iperf_parse_failed', {{'path': path, 'error': str(exc)}}))
-    post('/events', event('info', 'network', 'iperf_completed', {{'metrics': parsed, 'flows': len(paths)}}))
+    if parsed:
+        post('/events', event('info', 'network', 'iperf_completed', {{'metrics': parsed, 'flows': len(PARSED_IPERF_FILES)}}))
 
 
 def _max_percentile(jobs, op, percentile):
@@ -263,6 +268,8 @@ while time.time() < end:
         'status': running_flows if ROLE == 'network-sender' else (None if proc is None else proc.poll()),
         'ts': time.time(),
     }})
+    if ROLE == 'network-sender':
+        parse_iperf3_output()
     time.sleep(5)
 for active in flow_procs.values():
     if active.poll() is None:

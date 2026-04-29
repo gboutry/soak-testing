@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from soak_tester.config import SoakConfig
 from soak_tester.openstack_client.compute import placement_record, server_private_ip
-from soak_tester.openstack_client.identity import create_project_user
+from soak_tester.openstack_client.identity import create_project_user, get_role
 from soak_tester.openstack_client.network import create_security_group_rules
 from soak_tester.openstack_client.quota import set_unlimited_project_quotas
 from soak_tester.openstack_client.resources import owned_metadata, resource_record, tags_from_metadata
@@ -113,6 +113,13 @@ def provision_openstack_run(
     user = identity["user"]
     password = identity["password"]
     project_id = project.id
+    if _plan_uses_real_host_placement(plan):
+        admin_role = get_role(admin_conn, config.openstack.admin_role)
+        admin_conn.identity.assign_project_role_to_user(
+            project=project.id,
+            user=user.id,
+            role=admin_role.id,
+        )
     project_metadata = owned_metadata(run_id, "control", "project", project_name)
     tracker.add(
         resource_record(
@@ -285,7 +292,6 @@ def provision_openstack_run(
             metadata=control_meta,
         )
     )
-
     image = project_conn.image.find_image(config.openstack.image)
     placement: list[dict[str, Any]] = []
     controller = _boot_server(
@@ -338,6 +344,7 @@ def provision_openstack_run(
     placement.append(placement_record("controller", controller, plane="control", role="controller"))
 
     duration_s = duration_seconds(duration)
+    worker_duration_s = duration_s + 3600
     receiver_ips: list[str] = []
     receiver_ip_by_worker_id: dict[str, str] = {}
     receiver_servers = []
@@ -358,7 +365,7 @@ def provision_openstack_run(
             "network-receiver",
             index,
             controller_url,
-            duration_s,
+            worker_duration_s,
             receiver_ports=[
                 flow.receiver_port
                 for flow in plan.network.flow_assignments
@@ -388,7 +395,7 @@ def provision_openstack_run(
             "network-sender",
             index,
             controller_url,
-            duration_s,
+            worker_duration_s,
             peers=receiver_ips,
             flow_assignments=[
                 {
@@ -422,7 +429,7 @@ def provision_openstack_run(
                 "compute",
                 compute_index,
                 controller_url,
-                duration_s,
+                worker_duration_s,
                 flavor_name_override=str(group["flavor"]),
             )
             compute_index += 1
@@ -443,7 +450,7 @@ def provision_openstack_run(
             "storage",
             index,
             controller_url,
-            duration_s,
+            worker_duration_s,
         )
         storage_meta = owned_metadata(run_id, "storage", "volume", project_name)
         volume = project_conn.block_storage.create_volume(
@@ -502,6 +509,7 @@ def _create_worker(
         "api": config.flavors.api_worker,
     }[plane]
     flavor_name = flavor_name_override or flavor_name
+    availability_zone = _availability_zone_for_host(planned_host)
     server = _boot_server(
         conn,
         name=f"{project_name}-{worker_id}",
@@ -521,7 +529,7 @@ def _create_worker(
             receiver_ports=receiver_ports,
         ),
         metadata=metadata,
-        availability_zone=_availability_zone_for_host(planned_host),
+        availability_zone=availability_zone,
     )
     tracker.add(
         resource_record(
@@ -571,6 +579,12 @@ def _availability_zone_for_host(host: str | None) -> str | None:
     if not host or host.startswith("host-"):
         return None
     return f"nova:{host}"
+
+
+def _plan_uses_real_host_placement(plan: SoakPlan) -> bool:
+    hosts = set(plan.network.receiver_worker_hosts.values())
+    hosts.update(plan.network.sender_worker_hosts.values())
+    return any(host and not host.startswith("host-") for host in hosts)
 
 
 def _server_port(conn: Any, server_id: str) -> Any:

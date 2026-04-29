@@ -100,7 +100,13 @@ def create_plan(
 
     network_plan = _create_network_plan(config, target_percent)
 
-    storage_workers = config.workloads.storage.worker_count if config.workloads.storage.enabled else 0
+    storage_enabled = config.workloads.storage.enabled
+    storage_workers = config.workloads.storage.worker_count if storage_enabled else 0
+    api_target = (
+        config.capacity.api.ops_per_second * target_percent / 100
+        if config.workloads.api.enabled
+        else 0
+    )
 
     return SoakPlan(
         run_id=run_id,
@@ -108,15 +114,19 @@ def create_plan(
         compute=compute_plan,
         network=network_plan,
         storage=StoragePlan(
-            target_read_gbps=config.capacity.storage.read_gbps * target_percent / 100,
-            target_write_gbps=config.capacity.storage.write_gbps * target_percent / 100,
-            target_iops=config.capacity.storage.iops * target_percent / 100,
+            target_read_gbps=config.capacity.storage.read_gbps * target_percent / 100
+            if storage_enabled
+            else 0,
+            target_write_gbps=config.capacity.storage.write_gbps * target_percent / 100
+            if storage_enabled
+            else 0,
+            target_iops=config.capacity.storage.iops * target_percent / 100 if storage_enabled else 0,
             worker_count=storage_workers,
             volume_size_gib=config.workloads.storage.volume_size_gib,
             volume_type=config.workloads.storage.volume_type,
         ),
         api=ApiPlan(
-            target_ops_per_second=config.capacity.api.ops_per_second * target_percent / 100,
+            target_ops_per_second=api_target,
             run_from=config.workloads.api.run_from,
             operation_mix=config.workloads.api.operation_mix,
         ),
