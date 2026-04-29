@@ -1,16 +1,39 @@
 [project]
 name = "soak-tester"
 version = "0.1.0"
-description = "Add your description here"
+description = "OpenStack-native soak load testing tool"
 readme = "README.md"
 authors = [
     { name = "Guillaume Boutry", email = "guillaume.boutry@canonical.com" }
 ]
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=42",
+    "openstacksdk>=3.0",
+    "pydantic>=2",
+    "PyYAML>=6",
+    "requests>=2",
+    "rich>=13",
+    "typer>=0.12",
+    "pytest>=8",
+    "ruff>=0.5",
+]
 
 [project.scripts]
-soak-tester = "soak_tester:main"
+soak-tester = "soak_tester.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
 
 [build-system]
 requires = ["setuptools>=61"]
