@@ -24,10 +24,10 @@ from soak_tester.observability.collect import collect_prometheus, inspect_promet
 from soak_tester.observability.correlate import correlation_report
 from soak_tester.planner import create_plan, default_flavor_specs, write_plan
 from soak_tester.report import generate_final_report
-from soak_tester.run.provision import provision_skeleton
+from soak_tester.run.provision import provision_openstack_run
 from soak_tester.run.status import read_status
 from soak_tester.state import initial_state, load_state, save_state
-from soak_tester.util import ensure_dir, make_run_id, utcnow_iso
+from soak_tester.util import duration_seconds, ensure_dir, make_run_id, utcnow_iso
 
 console = Console()
 app = typer.Typer(help="OpenStack-native soak-load testing tool.")
@@ -122,19 +122,58 @@ def run(
     state.status = "provisioning"
     state.timeline.provisioning_started_at = utcnow_iso()
     save_state(run_dir, state)
-    provision_skeleton(run_dir=run_dir, run_id=run_dir.name, project_name=state.project_name, config=cfg)
-    (run_dir / "placement.json").write_text("[]\n", encoding="utf-8")
+    try:
+        conn = admin_connection(os_cloud)
+        provision_result = provision_openstack_run(
+            run_dir=run_dir,
+            run_id=run_dir.name,
+            project_name=state.project_name,
+            config=cfg,
+            plan=soak_plan,
+            admin_conn=conn,
+            duration=duration,
+        )
+        state.controller_url = provision_result["controller_url"]
+    except Exception as exc:
+        events.write(
+            level="error",
+            plane="control",
+            event="provisioning_failed",
+            details={"error": str(exc)},
+        )
+        state.status = "failed"
+        state.timeline.ended_at = utcnow_iso()
+        save_state(run_dir, state)
+        try:
+            cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
+        except Exception as cleanup_exc:
+            events.write(
+                level="error",
+                plane="control",
+                event="cleanup_after_failure_failed",
+                details={"error": str(cleanup_exc)},
+            )
+        generate_final_report(run_dir)
+        raise
     state.status = "running"
     state.timeline.steady_state_started_at = utcnow_iso()
     save_state(run_dir, state)
     events.write(level="info", plane="control", event="run_started")
+    time.sleep(min(duration_seconds(duration), 60))
     state.timeline.steady_state_ended_at = utcnow_iso()
     state.timeline.ended_at = utcnow_iso()
     state.status = "left-running" if cfg.run.leave_running else "completed"
     save_state(run_dir, state)
     generate_final_report(run_dir)
+    if cfg.run.cleanup_on_success and not cfg.run.leave_running:
+        cleanup_actions = cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
+        state.status = "completed"
+        state.timeline.cleanup_started_at = state.timeline.steady_state_ended_at
+        state.timeline.cleanup_ended_at = utcnow_iso()
+        state.summary["cleanup_actions"] = cleanup_actions
+        save_state(run_dir, state)
     console.print(f"Run artifacts written to {run_dir}")
-    console.print("MVP run orchestration created local artifacts; full VM provisioning is implemented behind SDK wrappers for follow-up hardening.")
+    console.print("OpenStack resources were provisioned for this run. See resources.json and placement.json.")
 
 
 @app.command()
@@ -193,11 +232,12 @@ def cleanup(
     state.status = "cleaning-up"
     state.timeline.cleanup_started_at = utcnow_iso()
     save_state(run, state)
-    actions = cleanup_run(run, dry_run=True if dry_run else True)
+    conn = None if dry_run else admin_connection(state.os_cloud or "sunbeam-admin")
+    actions = cleanup_run(run, conn=conn, dry_run=dry_run)
     if dry_run:
         console.print(json.dumps(actions, indent=2))
         return
-    state.status = "cleanup-failed"
+    state.status = "completed" if not any("error" in action for action in actions) else "cleanup-failed"
     state.timeline.cleanup_ended_at = utcnow_iso()
     save_state(run, state)
     console.print("[yellow]OpenStack destructive cleanup requires wiring a live admin connection; dry-run actions shown instead.[/yellow]")
