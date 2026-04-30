@@ -563,7 +563,7 @@ def calibrate_api(
     recommended = cfg.model_dump(mode="json")
     if selected:
         recommended["workloads"]["api"]["rally_concurrency"] = selected["concurrency"]
-        recommended["capacity"]["api"]["ops_per_second"] = selected["success_ops_per_second"]
+        recommended["targets"]["api"]["ops_per_second"] = selected["success_ops_per_second"]
     calibration = {
         "schema_version": 1,
         "run_id": run_dir.name,
@@ -692,7 +692,7 @@ def _write_run_config(run_dir: Path, source: Path, cfg: object) -> None:
 
 
 def _prepare_openstack_context(conn: object, cfg: object) -> None:
-    network = cfg.capacity.network
+    network = cfg.targets.network
     workload = cfg.workloads.network
     if network.scope != "per_host" or workload.hosts:
         return

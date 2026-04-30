@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from soak_tester.util import parse_duration
 
@@ -78,6 +78,10 @@ class CapacityConfig(BaseModel):
     network: NetworkCapacity
     storage: StorageCapacity
     api: ApiCapacity
+
+
+class TargetsConfig(CapacityConfig):
+    pass
 
 
 class ApiWorkloadConfig(BaseModel):
@@ -258,12 +262,23 @@ class SoakConfig(BaseModel):
     management: ManagementConfig = Field(default_factory=ManagementConfig)
     resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
     flavors: FlavorsConfig
-    capacity: CapacityConfig
+    targets: TargetsConfig | None = None
+    capacity: CapacityConfig | None = None
     workloads: WorkloadsConfig = Field(default_factory=WorkloadsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     run: RunConfig = Field(default_factory=RunConfig)
+
+    @model_validator(mode="after")
+    def populate_target_aliases(self) -> SoakConfig:
+        if self.targets is None and self.capacity is None:
+            raise ValueError("config requires either 'targets' or legacy 'capacity'")
+        if self.targets is None:
+            self.targets = TargetsConfig.model_validate(self.capacity.model_dump(mode="json"))
+        if self.capacity is None:
+            self.capacity = CapacityConfig.model_validate(self.targets.model_dump(mode="json"))
+        return self
 
 
 def load_config(path: str | Path) -> SoakConfig:
@@ -272,4 +287,6 @@ def load_config(path: str | Path) -> SoakConfig:
 
 
 def dump_config(config: SoakConfig) -> str:
-    return yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False)
+    payload = config.model_dump(mode="json")
+    payload.pop("capacity", None)
+    return yaml.safe_dump(payload, sort_keys=False)

@@ -39,18 +39,19 @@ soak-tester cleanup --run runs/soak-20260429-143000 --dry-run
 soak-tester observability collect --run runs/soak-20260429-143000
 ```
 
-## Capacity Model
+## Benchmark Targets
 
 Compute, network, storage, and API load are planned as separate domains and can
-run at the same time. Compute workers are sized from requested vCPU/RAM. Storage
-workers are sized from configured fio worker count and reported against
-read/write/IOPS targets. Network can use either an aggregate target or a
-host-aware full mesh:
+run at the same time. Benchmark profiles use `targets` for requested reporting
+values and `workloads` for concrete VM/workload shape. Compute can use an
+explicit worker count; storage workers are configured directly and reported
+against read/write/IOPS targets. Network can use either an aggregate target or
+a host-aware full mesh:
 
 ```yaml
 boot_concurrency: 12
 
-capacity:
+targets:
   network:
     gbps: 200
     scope: per_host
@@ -71,11 +72,11 @@ enabled hypervisors with admin Nova credentials and records them in the plan.
 `soak-tester calibrate cloud` writes `runs/<run-id>/calibration.json` and
 `runs/<run-id>/calibrated-capacity.yaml`. Compute capacity is discovered from
 Placement inventories when available. On dedicated-CPU clouds, `PCPU` inventory
-is selected when `VCPU` inventory is zero, while `capacity.compute.vcpus` remains
+is selected when `VCPU` inventory is zero, while `targets.compute.vcpus` remains
 the guest-core count used by the planner:
 
 ```yaml
-capacity:
+targets:
   compute:
     vcpus: 1248
     ram_gib: 2304
@@ -86,7 +87,7 @@ If benchmark flavors use huge pages and Placement exposes only generic
 `MEMORY_MB`, set the intended per-host memory envelope explicitly:
 
 ```yaml
-capacity:
+targets:
   compute:
     per_host_ram_gib: 2048
 ```

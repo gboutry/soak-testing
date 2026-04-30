@@ -213,6 +213,47 @@ workloads:
     assert config.workloads.compute.worker_count == 282
 
 
+def test_load_config_accepts_targets_without_legacy_capacity(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+targets:
+  compute:
+    vcpus: 1128
+    ram_gib: 4512
+  network:
+    gbps: 100
+    scope: per_host
+    per_host_gbps: 33.33
+  storage:
+    read_gbps: 4
+    write_gbps: 2
+    iops: 100000
+  api:
+    ops_per_second: 32
+workloads:
+  compute:
+    worker_count: 282
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.targets.compute.vcpus == 1128
+    assert config.capacity.compute.vcpus == 1128
+    assert config.workloads.compute.worker_count == 282
+
+
 @pytest.mark.parametrize(
     ("text", "seconds"),
     [("30s", 30), ("5m", 300), ("8h", 28800), ("1d", 86400)],

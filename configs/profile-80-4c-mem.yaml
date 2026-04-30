@@ -28,9 +28,9 @@ flavors:
   storage_worker: m1.benchmark
   api_worker: m1.benchmark
 
-capacity:
+targets:
   compute:
-    vcpus: 1200
+    vcpus: 1248
     ram_gib: 4800
     cpu_resource_class: PCPU
     ram_resource_class: MEMORY_MB
@@ -67,6 +67,7 @@ workloads:
     enabled: true
     cpu_load_percent: 95
     memory_load_percent: 95
+    worker_count: 282
     flavor_mix:
       - m1.benchmark-4c-mem
 
@@ -87,7 +88,7 @@ workloads:
   storage:
     enabled: true
     volume_type: __DEFAULT__
-    volume_size_gib: 10
+    volume_size_gib: 100
     profile: mixed-randrw
     block_size: 4k
     iodepth: 32
@@ -102,31 +103,6 @@ monitoring:
   worker_metrics:
     enabled: true
     interval: 5s
-
-observability:
-  enabled: true
-  prometheus:
-    enabled: true
-    url: http://prometheus.example.internal:9090
-    timeout: 30s
-    query_step: 15s
-    auth:
-      type: none
-      token_file: null
-      username: null
-      password_env: null
-    tls:
-      verify: true
-      ca_file: null
-    labels:
-      host_label: instance
-      hostname_label: hostname
-    network:
-      enabled: true
-      device_regex: bond.*|eno.*|ens.*|eth.*
-      exclude_device_regex: lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*
-    query_packs:
-      - node-exporter-network
 
 run:
   warmup: 5m

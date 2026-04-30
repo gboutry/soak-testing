@@ -20,7 +20,7 @@ def discover_cloud_capacity(conn: Any, config: SoakConfig) -> dict[str, Any]:
     Placement is authoritative for modern Nova CPU inventories. In dedicated CPU
     clouds, compute nodes may expose zero VCPU and all schedulable guest cores as
     PCPU. We keep that resource-class provenance in the calibration report while
-    writing the selected guest-core count back to capacity.compute.vcpus.
+    writing the selected guest-core count back to targets.compute.vcpus.
     """
 
     hypervisor_names = list_hypervisor_names(conn)
@@ -29,12 +29,12 @@ def discover_cloud_capacity(conn: Any, config: SoakConfig) -> dict[str, Any]:
     cpu = select_compute_cpu_capacity(
         placement=placement,
         hypervisors=hypervisors,
-        requested_resource_class=config.capacity.compute.cpu_resource_class,
+        requested_resource_class=config.targets.compute.cpu_resource_class,
     )
     memory = select_memory_capacity(
         placement=placement,
         hypervisors=hypervisors,
-        configured_per_host_ram_gib=config.capacity.compute.per_host_ram_gib,
+        configured_per_host_ram_gib=config.targets.compute.per_host_ram_gib,
         host_count=len(hypervisor_names),
     )
     network = discover_network_inventory(conn, config)
@@ -61,10 +61,10 @@ def discover_cloud_capacity(conn: Any, config: SoakConfig) -> dict[str, Any]:
         "storage": storage,
         "api": {
             "source": "config_assumption",
-            "ops_per_second": config.capacity.api.ops_per_second,
+            "ops_per_second": config.targets.api.ops_per_second,
             "note": "OpenStack does not advertise API throughput capacity; use an API probe to replace this assumption.",
         },
-        "generated_capacity": generated_config["capacity"],
+        "generated_capacity": generated_config["targets"],
     }
 
 
@@ -76,10 +76,11 @@ def build_calibrated_config(
     cpu_resource_class: str,
 ) -> dict[str, Any]:
     payload = copy.deepcopy(config.model_dump(mode="json"))
-    payload["capacity"]["compute"]["vcpus"] = cpu_vcpus
-    payload["capacity"]["compute"]["ram_gib"] = memory_ram_gib
-    payload["capacity"]["compute"]["cpu_resource_class"] = cpu_resource_class
-    network = payload["capacity"]["network"]
+    payload.pop("capacity", None)
+    payload["targets"]["compute"]["vcpus"] = cpu_vcpus
+    payload["targets"]["compute"]["ram_gib"] = memory_ram_gib
+    payload["targets"]["compute"]["cpu_resource_class"] = cpu_resource_class
+    network = payload["targets"]["network"]
     workload_hosts = payload["workloads"]["network"].get("hosts")
     host_count = len(workload_hosts or []) or payload["workloads"]["network"].get("host_count")
     if network.get("scope") == "per_host" and network.get("per_host_gbps") and host_count:
@@ -244,14 +245,14 @@ def _initial_exercisable_capacity(config: SoakConfig, plan_100: Any) -> dict[str
         "compute": {
             "vcpus": plan_100.compute.planned_vcpus,
             "ram_gib": plan_100.compute.planned_ram_gib,
-            "cpu_resource_class": config.capacity.compute.cpu_resource_class,
+            "cpu_resource_class": config.targets.compute.cpu_resource_class,
             "worker_count": plan_100.compute.worker_count,
             "worker_groups": plan_100.compute.worker_groups,
         },
         "network": {
-            "gbps": config.capacity.network.gbps,
-            "scope": config.capacity.network.scope,
-            "per_host_gbps": config.capacity.network.per_host_gbps,
+            "gbps": config.targets.network.gbps,
+            "scope": config.targets.network.scope,
+            "per_host_gbps": config.targets.network.per_host_gbps,
             "host_count": plan_100.network.host_count,
             "direction": config.calibration.network_direction,
             "sender_worker_target_gbps": config.workloads.network.sender_worker_target_gbps,
@@ -259,14 +260,14 @@ def _initial_exercisable_capacity(config: SoakConfig, plan_100: Any) -> dict[str
             "target_gbps_per_flow": config.workloads.network.target_gbps_per_flow,
         },
         "storage": {
-            "read_gbps": config.capacity.storage.read_gbps,
-            "write_gbps": config.capacity.storage.write_gbps,
-            "iops": config.capacity.storage.iops,
+            "read_gbps": config.targets.storage.read_gbps,
+            "write_gbps": config.targets.storage.write_gbps,
+            "iops": config.targets.storage.iops,
             "profile": config.workloads.storage.profile,
             "worker_count": config.workloads.storage.worker_count,
         },
         "api": {
-            "ops_per_second": config.capacity.api.ops_per_second,
+            "ops_per_second": config.targets.api.ops_per_second,
             "run_from": "controller",
         },
     }
@@ -379,17 +380,18 @@ def _apply_derating(
 
 def _config_with_exercisable_capacity(config: SoakConfig, exercisable: dict[str, Any]) -> dict[str, Any]:
     payload = copy.deepcopy(config.model_dump(mode="json"))
-    payload["capacity"]["compute"]["vcpus"] = int(exercisable["compute"]["vcpus"])
-    payload["capacity"]["compute"]["ram_gib"] = float(exercisable["compute"]["ram_gib"])
-    payload["capacity"]["network"]["gbps"] = float(exercisable["network"]["gbps"])
+    payload.pop("capacity", None)
+    payload["targets"]["compute"]["vcpus"] = int(exercisable["compute"]["vcpus"])
+    payload["targets"]["compute"]["ram_gib"] = float(exercisable["compute"]["ram_gib"])
+    payload["targets"]["network"]["gbps"] = float(exercisable["network"]["gbps"])
     if exercisable["network"].get("per_host_gbps") is not None:
-        payload["capacity"]["network"]["per_host_gbps"] = float(
+        payload["targets"]["network"]["per_host_gbps"] = float(
             exercisable["network"]["per_host_gbps"]
         )
-    payload["capacity"]["storage"]["read_gbps"] = float(exercisable["storage"]["read_gbps"])
-    payload["capacity"]["storage"]["write_gbps"] = float(exercisable["storage"]["write_gbps"])
-    payload["capacity"]["storage"]["iops"] = int(exercisable["storage"]["iops"])
-    payload["capacity"]["api"]["ops_per_second"] = float(exercisable["api"]["ops_per_second"])
+    payload["targets"]["storage"]["read_gbps"] = float(exercisable["storage"]["read_gbps"])
+    payload["targets"]["storage"]["write_gbps"] = float(exercisable["storage"]["write_gbps"])
+    payload["targets"]["storage"]["iops"] = int(exercisable["storage"]["iops"])
+    payload["targets"]["api"]["ops_per_second"] = float(exercisable["api"]["ops_per_second"])
     payload["workloads"]["api"]["engine"] = "rally"
     payload["workloads"]["api"]["run_from"] = "controller"
     payload["workloads"]["api"]["rally_concurrency"] = max(
@@ -549,7 +551,7 @@ def select_compute_cpu_capacity(
         "VCPU": vcpu,
         "note": (
             "PCPU is selected when Placement exposes dedicated CPU inventory and VCPU is absent. "
-            "capacity.compute.vcpus remains the guest-core count used by the planner."
+            "targets.compute.vcpus remains the guest-core count used by the planner."
         ),
     }
 
@@ -603,7 +605,7 @@ def discover_network_inventory(conn: Any, config: SoakConfig) -> dict[str, Any]:
         network = None
     return {
         "source": "openstack_inventory_and_config_assumption",
-        "configured_capacity": config.capacity.network.model_dump(mode="json"),
+        "configured_capacity": config.targets.network.model_dump(mode="json"),
         "external_network": _network_record(network) if network else None,
         "note": (
             "Neutron does not advertise tenant overlay bandwidth. Use network workload "

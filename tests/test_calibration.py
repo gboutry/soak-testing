@@ -117,7 +117,7 @@ def test_cloud_calibration_preserves_config_assumptions_for_non_advertised_perf(
 
 def test_cloud_calibration_can_use_configured_hugepage_memory_envelope():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.compute.per_host_ram_gib = 2048
+    config.targets.compute.per_host_ram_gib = 2048
 
     calibration = discover_cloud_capacity(FakeConnection(), config)
 
@@ -130,7 +130,7 @@ def test_cloud_calibration_can_use_configured_hugepage_memory_envelope():
 
 def test_profile_uses_feasible_flavor_packing_as_exercisable_compute_capacity():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.compute.per_host_ram_gib = 2048
+    config.targets.compute.per_host_ram_gib = 2048
     config.workloads.compute.flavor_mix = ["m1.big", "m1.small"]
     cloud = discover_cloud_capacity(FakeConnection(), config)
     flavors = _flavors()
@@ -145,14 +145,14 @@ def test_profile_uses_feasible_flavor_packing_as_exercisable_compute_capacity():
     assert profile["inventory_capacity"]["compute"]["vcpus"] == 1248
     assert profile["exercisable_capacity"]["compute"]["vcpus"] <= 1248
     assert profile["exercisable_capacity"]["compute"]["ram_gib"] <= 6144
-    assert tuned_config["capacity"]["compute"]["cpu_resource_class"] == "PCPU"
+    assert tuned_config["targets"]["compute"]["cpu_resource_class"] == "PCPU"
     assert tuned_config["workloads"]["api"]["run_from"] == "controller"
 
 
 def test_profile_derates_missed_validation_planes_once(tmp_path):
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.network.scope = "per_host"
-    config.capacity.network.per_host_gbps = 200
+    config.targets.network.scope = "per_host"
+    config.targets.network.per_host_gbps = 200
     config.workloads.network.topology = "full_mesh"
     config.workloads.network.host_count = 3
     cloud = discover_cloud_capacity(FakeConnection(), config)
@@ -186,8 +186,8 @@ def test_profile_derates_missed_validation_planes_once(tmp_path):
     assert profile["exercisable_capacity"]["network"]["gbps"] == 300
     assert profile["exercisable_capacity"]["network"]["per_host_gbps"] == 100
     assert profile["exercisable_capacity"]["api"]["ops_per_second"] == 75
-    assert tuned_config["capacity"]["network"]["gbps"] == 300
-    assert tuned_config["capacity"]["network"]["per_host_gbps"] == 100
+    assert tuned_config["targets"]["network"]["gbps"] == 300
+    assert tuned_config["targets"]["network"]["per_host_gbps"] == 100
 
 
 def test_calibration_profile_writes_operator_ready_recommended_profile(tmp_path):

@@ -89,8 +89,8 @@ def create_plan(
     flavor_specs: dict[str, FlavorSpec],
     run_id: str = "planned",
 ) -> SoakPlan:
-    target_vcpus = config.capacity.compute.vcpus * target_percent / 100
-    target_ram_gib = config.capacity.compute.ram_gib * target_percent / 100
+    target_vcpus = config.targets.compute.vcpus * target_percent / 100
+    target_ram_gib = config.targets.compute.ram_gib * target_percent / 100
     compute_plan = _create_compute_plan(
         config,
         target_vcpus=target_vcpus,
@@ -103,7 +103,7 @@ def create_plan(
     storage_enabled = config.workloads.storage.enabled
     storage_workers = config.workloads.storage.worker_count if storage_enabled else 0
     api_target = (
-        config.capacity.api.ops_per_second * target_percent / 100
+        config.targets.api.ops_per_second * target_percent / 100
         if config.workloads.api.enabled
         else 0
     )
@@ -114,13 +114,13 @@ def create_plan(
         compute=compute_plan,
         network=network_plan,
         storage=StoragePlan(
-            target_read_gbps=config.capacity.storage.read_gbps * target_percent / 100
+            target_read_gbps=config.targets.storage.read_gbps * target_percent / 100
             if storage_enabled
             else 0,
-            target_write_gbps=config.capacity.storage.write_gbps * target_percent / 100
+            target_write_gbps=config.targets.storage.write_gbps * target_percent / 100
             if storage_enabled
             else 0,
-            target_iops=config.capacity.storage.iops * target_percent / 100 if storage_enabled else 0,
+            target_iops=config.targets.storage.iops * target_percent / 100 if storage_enabled else 0,
             worker_count=storage_workers,
             volume_size_gib=config.workloads.storage.volume_size_gib,
             volume_type=config.workloads.storage.volume_type,
@@ -273,9 +273,9 @@ def _create_network_plan(config: SoakConfig, target_percent: float) -> NetworkPl
             target_gbps_per_flow=per_flow,
             parallel_streams_per_flow=workload.parallel_streams_per_flow,
         )
-    if config.capacity.network.scope == "per_host":
+    if config.targets.network.scope == "per_host":
         return _create_per_host_network_plan(config, target_percent)
-    target_gbps = config.capacity.network.gbps * target_percent / 100
+    target_gbps = config.targets.network.gbps * target_percent / 100
     flows = math.ceil(target_gbps / per_flow)
     receiver_count = math.ceil(flows / 2)
     sender_count = max(1, flows - receiver_count)
@@ -309,7 +309,7 @@ def _create_per_host_network_plan(config: SoakConfig, target_percent: float) -> 
         raise ValueError("per-host network planning requires workloads.network.host_count >= 2")
     if workload.topology != "full_mesh":
         raise ValueError("per-host network planning requires workloads.network.topology: full_mesh")
-    per_host_capacity = config.capacity.network.per_host_gbps or config.capacity.network.gbps
+    per_host_capacity = config.targets.network.per_host_gbps or config.targets.network.gbps
     target_per_host = per_host_capacity * target_percent / 100
     target_per_pair = target_per_host / (host_count - 1)
     flows_per_pair = math.ceil(target_per_pair / workload.target_gbps_per_flow)

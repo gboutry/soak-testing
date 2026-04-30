@@ -30,8 +30,8 @@ def test_planner_converts_target_to_resource_counts():
 
 def test_planner_models_per_host_full_mesh_network_capacity():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.network.scope = "per_host"
-    config.capacity.network.per_host_gbps = 200
+    config.targets.network.scope = "per_host"
+    config.targets.network.per_host_gbps = 200
     config.workloads.network.topology = "full_mesh"
     config.workloads.network.target_gbps_per_flow = 5
     config.workloads.network.sender_worker_target_gbps = 20
@@ -70,7 +70,7 @@ def test_planner_models_per_host_full_mesh_network_capacity():
 
 def test_planner_uses_all_receivers_in_aggregate_network_plan():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.network.gbps = 200
+    config.targets.network.gbps = 200
     config.workloads.network.target_gbps_per_flow = 5
     flavors = {
         "m1.soak-compute": FlavorSpec(name="m1.soak-compute", vcpus=8, ram_gib=16),
@@ -89,8 +89,8 @@ def test_planner_uses_all_receivers_in_aggregate_network_plan():
 
 def test_planner_can_mix_compute_flavors_to_match_cpu_and_memory_targets():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.compute.vcpus = 1200
-    config.capacity.compute.ram_gib = 2048
+    config.targets.compute.vcpus = 1200
+    config.targets.compute.ram_gib = 2048
     config.flavors.compute_worker = "m1.benchmark-big"
     config.workloads.compute.flavor_mix = ["m1.benchmark-big", "m1.benchmark-4c"]
     flavors = {
@@ -116,8 +116,8 @@ def test_planner_can_mix_compute_flavors_to_match_cpu_and_memory_targets():
 
 def test_planner_uses_explicit_compute_worker_count_when_configured():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
-    config.capacity.compute.vcpus = 1248
-    config.capacity.compute.ram_gib = 4800
+    config.targets.compute.vcpus = 1248
+    config.targets.compute.ram_gib = 4800
     config.flavors.compute_worker = "m1.benchmark-4c-mem"
     config.workloads.compute.flavor_mix = ["m1.benchmark-4c-mem"]
     config.workloads.compute.worker_count = 282
@@ -139,3 +139,27 @@ def test_planner_uses_explicit_compute_worker_count_when_configured():
     assert plan.compute.worker_groups == [
         {"flavor": "m1.benchmark-4c-mem", "count": 282, "vcpus": 1128, "ram_gib": 4512}
     ]
+
+
+def test_planner_uses_targets_for_requested_load():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.targets.compute.vcpus = 1128
+    config.targets.compute.ram_gib = 4512
+    config.targets.network.gbps = 120
+    config.targets.storage.iops = 200000
+    config.targets.api.ops_per_second = 32
+    flavors = {
+        "m1.soak-compute": FlavorSpec(name="m1.soak-compute", vcpus=8, ram_gib=16),
+        "m1.soak-net": FlavorSpec(name="m1.soak-net", vcpus=4, ram_gib=8),
+        "m1.soak-fio": FlavorSpec(name="m1.soak-fio", vcpus=4, ram_gib=8),
+        "m1.soak-controller": FlavorSpec(name="m1.soak-controller", vcpus=2, ram_gib=4),
+        "m1.soak-api": FlavorSpec(name="m1.soak-api", vcpus=2, ram_gib=4),
+    }
+
+    plan = create_plan(config, target_percent=80, flavor_specs=flavors)
+
+    assert plan.compute.target_vcpus == 902.4
+    assert plan.compute.target_ram_gib == 3609.6
+    assert plan.network.target_gbps == 96
+    assert plan.storage.target_iops == 160000
+    assert plan.api.target_ops_per_second == 25.6
