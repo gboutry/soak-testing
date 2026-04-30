@@ -72,9 +72,9 @@ workloads:
     topology: full_mesh
     flow_duration: 60s
     parallel_streams_per_flow: 4
-    target_gbps_per_flow: 1.09
-    sender_worker_target_gbps: 4.36
-    receiver_worker_target_gbps: 4.36
+    target_gbps_per_flow: 1.1
+    sender_worker_target_gbps: 4.37
+    receiver_worker_target_gbps: 4.37
     receiver_port_base: 5201
     max_flows: 1000
     max_workers: 300
