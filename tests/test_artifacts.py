@@ -93,6 +93,21 @@ def test_summarize_metrics_sums_per_worker_series_averages():
     assert summary["iperf.goodput_gbps_avg"] == 8
 
 
+def test_summarize_metrics_averages_percent_metrics_across_workers():
+    summary = _summarize_metrics(
+        [
+            {"metric": "guest.cpu_percent", "worker_id": "compute-0", "value": 90},
+            {"metric": "guest.cpu_percent", "worker_id": "compute-0", "value": 100},
+            {"metric": "guest.cpu_percent", "worker_id": "compute-1", "value": 50},
+            {"metric": "api.error_rate", "worker_id": "local", "value": 0.1},
+            {"metric": "api.error_rate", "worker_id": "local", "value": 0.3},
+        ]
+    )
+
+    assert summary["guest.cpu_percent_avg"] == 72.5
+    assert summary["api.error_rate_avg"] == 0.2
+
+
 def test_summarize_metrics_treats_repeated_flow_files_as_one_series():
     summary = _summarize_metrics(
         [

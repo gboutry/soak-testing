@@ -104,13 +104,26 @@ def _summarize_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
         )
     for name, series in grouped.items():
         series_avgs = [sum(values) / len(values) for values in series.values()]
-        aggregate_avg = sum(series_avgs)
+        aggregate_avg = _aggregate_series_averages(name, series_avgs)
         result[f"{name}_avg"] = aggregate_avg
         if name.endswith("_bps"):
             result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
         if name.endswith(".goodput_bps"):
             result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
     return result
+
+
+def _aggregate_series_averages(name: str, series_avgs: list[float]) -> float:
+    if not series_avgs:
+        return 0.0
+    if (
+        name.endswith("_percent")
+        or name.endswith(".error_rate")
+        or name.endswith("_latency_ns")
+        or name.endswith("_latency_ms")
+    ):
+        return sum(series_avgs) / len(series_avgs)
+    return sum(series_avgs)
 
 
 def _metric_series_key(metric: dict[str, Any]) -> str:
