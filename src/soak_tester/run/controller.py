@@ -7,7 +7,8 @@ set -eux
 cat >/usr/local/bin/soak-controller <<'PY'
 #!/usr/bin/env python3
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path('/var/lib/soak-tester')
@@ -16,9 +17,12 @@ HEARTBEATS = ROOT / 'heartbeats.jsonl'
 EVENTS = ROOT / 'events.jsonl'
 METRICS = ROOT / 'metrics.jsonl'
 CONSOLE = Path('/dev/console')
+DEBUG_CONSOLE = os.environ.get('SOAK_CONTROLLER_DEBUG_CONSOLE') == '1'
 
 
 def mirror(kind, payload):
+    if not DEBUG_CONSOLE:
+        return
     try:
         with CONSOLE.open('a') as stream:
             stream.write('SOAK_' + kind.upper() + ' ' + payload + '\n')
@@ -27,6 +31,9 @@ def mirror(kind, payload):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
     def _json(self, code, payload):
         data = json.dumps(payload).encode()
         self.send_response(code)
@@ -74,8 +81,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {'error': 'not found'})
 
 
-HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+server = ThreadingHTTPServer(('0.0.0.0', 8080), Handler)
+server.daemon_threads = True
+server.serve_forever()
 PY
 chmod 0755 /usr/local/bin/soak-controller
-nohup /usr/local/bin/soak-controller >/dev/console 2>&1 &
+nohup /usr/local/bin/soak-controller >/var/log/soak-controller.log 2>&1 &
 """

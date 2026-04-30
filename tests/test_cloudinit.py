@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from soak_tester.config import load_config
+from soak_tester.run.controller import controller_cloud_init
 from soak_tester.workloads.cloudinit import worker_cloud_init
 
 
@@ -35,3 +36,11 @@ def test_worker_cloud_init_separates_agent_and_workload_duration():
     assert "AGENT_DURATION = 3660" in script
     assert "WORKLOAD_DURATION = 60" in script
     assert "'--runtime', str(WORKLOAD_DURATION)" in script
+
+
+def test_controller_cloud_init_uses_threaded_http_server_without_console_spam():
+    script = controller_cloud_init()
+
+    assert "ThreadingHTTPServer" in script
+    assert "SOAK_CONTROLLER_DEBUG_CONSOLE" in script
+    assert ">/var/log/soak-controller.log" in script
