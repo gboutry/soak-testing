@@ -479,7 +479,7 @@
       "id": 12,
       "type": "bargauge",
       "title": "Nova instances by status",
-      "description": "Uses `openstack_nova_server_status` if per-server status is exposed; this may show no data on exporters that only expose aggregate VM counts.",
+      "description": "Uses `openstack_nova_server_status` if per-server status is exposed; this may show no data on exporters that only expose aggregate VM counts. Counts are colored by status, not magnitude: many healthy instances are not inherently bad.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -512,21 +512,74 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 75
-              },
-              {
-                "color": "red",
-                "value": 90
               }
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(ACTIVE|active)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(SHUTOFF|PAUSED|SUSPENDED|SHELVED.*|SOFT_DELETED|DELETED|shutoff|paused|suspended|shelved.*|soft_deleted|deleted)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(BUILD|REBUILD|MIGRATING|RESIZE|VERIFY_RESIZE|REBOOT|HARD_REBOOT|PASSWORD|REVERT_RESIZE|build|rebuild|migrating|resize|verify_resize|reboot|hard_reboot|password|revert_resize)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(ERROR|UNKNOWN|error|unknown)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -537,8 +590,8 @@
           "fields": ""
         },
         "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "displayMode": "basic",
+        "showUnfilled": false
       }
     },
     {
@@ -664,7 +717,7 @@
       "id": 14,
       "type": "bargauge",
       "title": "Neutron ports by status",
-      "description": "OpenStack exporter `openstack_neutron_port`, grouped by Neutron port status.",
+      "description": "OpenStack exporter `openstack_neutron_port`, grouped by Neutron port status. Counts are colored by status, not magnitude: many active ports are not inherently bad.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -697,21 +750,59 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 75
-              },
-              {
-                "color": "red",
-                "value": 90
               }
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(ACTIVE|active)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(DOWN|BUILD|down|build)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(ERROR|N/A|error|n/a)$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -722,8 +813,8 @@
           "fields": ""
         },
         "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "displayMode": "basic",
+        "showUnfilled": false
       }
     },
     {
@@ -2539,7 +2630,7 @@
       "id": 46,
       "type": "timeseries",
       "title": "OVS interface RX/TX",
-      "description": "OVS interface counters are a virtual switching breakdown. Do not sum this panel with physical NIC or VM vNIC totals; the same packet can appear on patch, tunnel, bridge, and VM-facing interfaces.",
+      "description": "OVS interface counters are a virtual switching breakdown. Do not sum this panel with physical NIC or VM vNIC totals; the same packet can appear on patch, tunnel, bridge, and VM-facing interfaces. Rates use clamped deltas to avoid false spikes when OVS counters drop to a lower non-zero value.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2557,7 +2648,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (system_id, name) (rate(ovs_interface_rx_bytes_total[$__rate_interval]) * 8 * on (system_id, uuid) group_left(name) ovs_interface)",
+          "expr": "sum by (system_id, name) (clamp_min(delta(ovs_interface_rx_bytes_total[5m]) * 8 / 300, 0) * on (system_id, uuid) group_left(name) ovs_interface)",
           "legendFormat": "RX {{system_id}} {{name}}",
           "range": true,
           "instant": false,
@@ -2570,7 +2661,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (system_id, name) (rate(ovs_interface_tx_bytes_total[$__rate_interval]) * 8 * on (system_id, uuid) group_left(name) ovs_interface)",
+          "expr": "sum by (system_id, name) (clamp_min(delta(ovs_interface_tx_bytes_total[5m]) * 8 / 300, 0) * on (system_id, uuid) group_left(name) ovs_interface)",
           "legendFormat": "TX {{system_id}} {{name}}",
           "range": true,
           "instant": false,
