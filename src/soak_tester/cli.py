@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Annotated
@@ -184,7 +185,7 @@ def run(
     events.write(level="info", plane="control", event="run_started")
     duration_s = duration_seconds(duration)
     if cfg.workloads.api.enabled and soak_plan.api.target_ops_per_second > 0:
-        ApiWorkload(
+        api_workload = ApiWorkload(
             conn=provision_result["project_conn"],
             operation_mix=cfg.workloads.api.operation_mix,
             target_ops_per_second=soak_plan.api.target_ops_per_second,
@@ -196,9 +197,10 @@ def run(
             event_writer=events,
             tracker=provision_result["tracker"],
             create_delete_volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
-        ).run()
+        )
+        _run_api_workload_with_periodic_collection(api_workload, run_dir=run_dir, state=state)
     else:
-        time.sleep(duration_s)
+        _sleep_with_periodic_collection(duration_s, run_dir=run_dir, state=state)
     state.timeline.steady_state_ended_at = utcnow_iso()
     state.timeline.ended_at = utcnow_iso()
     state.status = "left-running" if cfg.run.leave_running else "completed"
@@ -220,6 +222,56 @@ def run(
         save_state(run_dir, state)
     console.print(f"Run artifacts written to {run_dir}")
     console.print("OpenStack resources were provisioned for this run. See resources.json and placement.json.")
+
+
+def _run_api_workload_with_periodic_collection(
+    api_workload: ApiWorkload,
+    *,
+    run_dir: Path,
+    state,
+    interval_seconds: int = 60,
+) -> None:
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            api_workload.run()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread.
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, name="soak-api-workload")
+    thread.start()
+    while thread.is_alive():
+        thread.join(timeout=interval_seconds)
+        _collect_controller_periodic(run_dir, state)
+    if errors:
+        raise errors[0]
+
+
+def _sleep_with_periodic_collection(
+    duration_s: int,
+    *,
+    run_dir: Path,
+    state,
+    interval_seconds: int = 60,
+) -> None:
+    deadline = time.monotonic() + duration_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(interval_seconds, remaining))
+        _collect_controller_periodic(run_dir, state)
+
+
+def _collect_controller_periodic(run_dir: Path, state) -> None:
+    if not state.controller_url:
+        return
+    counts = collect_controller_artifacts(run_dir, state.controller_url, state.run_id)
+    summary = state.summary.setdefault("controller_collection_periodic", {"events": 0, "metrics": 0})
+    summary["events"] += counts.get("events", 0)
+    summary["metrics"] += counts.get("metrics", 0)
+    save_state(run_dir, state)
 
 
 @app.command()
