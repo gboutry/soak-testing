@@ -377,7 +377,7 @@ def provision_openstack_run(
                     index,
                     controller_url,
                     worker_duration_s,
-                    duration_s,
+                    worker_duration_s,
                     receiver_ports=[
                         flow.receiver_port
                         for flow in plan.network.flow_assignments
@@ -419,7 +419,7 @@ def provision_openstack_run(
                     index,
                     controller_url,
                     worker_duration_s,
-                    duration_s,
+                    worker_duration_s,
                     peers=receiver_ips,
                     flow_assignments=[
                         {
@@ -470,7 +470,7 @@ def provision_openstack_run(
                         index,
                         controller_url,
                         worker_duration_s,
-                        duration_s,
+                        worker_duration_s,
                         flavor_name_override=flavor,
                     ),
                 )
