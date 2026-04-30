@@ -116,6 +116,7 @@ class ComputeWorkloadConfig(BaseModel):
     enabled: bool = True
     cpu_load_percent: int = 95
     memory_load_percent: int = 70
+    worker_count: int | None = Field(default=None, ge=0)
     flavor_mix: list[str] = Field(default_factory=list)
 
 

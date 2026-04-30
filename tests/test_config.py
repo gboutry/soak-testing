@@ -176,6 +176,43 @@ workloads:
     assert config.workloads.api.rally_times == 120
 
 
+def test_compute_workload_accepts_explicit_worker_count(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+workloads:
+  compute:
+    worker_count: 282
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.workloads.compute.worker_count == 282
+
+
 @pytest.mark.parametrize(
     ("text", "seconds"),
     [("30s", 30), ("5m", 300), ("8h", 28800), ("1d", 86400)],

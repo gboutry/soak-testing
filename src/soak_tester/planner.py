@@ -160,6 +160,22 @@ def _create_compute_plan(
         )
     flavor_names = config.workloads.compute.flavor_mix or [config.flavors.compute_worker]
     flavor_names = list(dict.fromkeys(flavor_names))
+    explicit_worker_count = config.workloads.compute.worker_count
+    if explicit_worker_count is not None:
+        if len(flavor_names) != 1:
+            raise ValueError("workloads.compute.worker_count requires exactly one compute flavor")
+        compute_flavor = flavor_specs[flavor_names[0]]
+        return ComputePlan(
+            target_vcpus=target_vcpus,
+            target_ram_gib=target_ram_gib,
+            worker_count=explicit_worker_count,
+            worker_flavor=compute_flavor.name,
+            planned_vcpus=explicit_worker_count * compute_flavor.vcpus,
+            planned_ram_gib=explicit_worker_count * compute_flavor.ram_gib,
+            worker_groups=[
+                _compute_worker_group(compute_flavor, explicit_worker_count)
+            ] if explicit_worker_count else [],
+        )
     if len(flavor_names) == 1:
         compute_flavor = flavor_specs[flavor_names[0]]
         by_cpu = math.floor(target_vcpus / compute_flavor.vcpus)

@@ -112,3 +112,30 @@ def test_planner_can_mix_compute_flavors_to_match_cpu_and_memory_targets():
         {"flavor": "m1.benchmark-big", "count": 48, "vcpus": 768, "ram_gib": 1536},
         {"flavor": "m1.benchmark-4c", "count": 48, "vcpus": 192, "ram_gib": 96},
     ]
+
+
+def test_planner_uses_explicit_compute_worker_count_when_configured():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.capacity.compute.vcpus = 1248
+    config.capacity.compute.ram_gib = 4800
+    config.flavors.compute_worker = "m1.benchmark-4c-mem"
+    config.workloads.compute.flavor_mix = ["m1.benchmark-4c-mem"]
+    config.workloads.compute.worker_count = 282
+    flavors = {
+        "m1.benchmark-4c-mem": FlavorSpec(name="m1.benchmark-4c-mem", vcpus=4, ram_gib=16),
+        "m1.soak-net": FlavorSpec(name="m1.soak-net", vcpus=4, ram_gib=8),
+        "m1.soak-fio": FlavorSpec(name="m1.soak-fio", vcpus=4, ram_gib=8),
+        "m1.soak-controller": FlavorSpec(name="m1.soak-controller", vcpus=2, ram_gib=4),
+        "m1.soak-api": FlavorSpec(name="m1.soak-api", vcpus=2, ram_gib=4),
+    }
+
+    plan = create_plan(config, target_percent=80, flavor_specs=flavors)
+
+    assert plan.compute.target_vcpus == 998.4
+    assert plan.compute.target_ram_gib == 3840
+    assert plan.compute.worker_count == 282
+    assert plan.compute.planned_vcpus == 1128
+    assert plan.compute.planned_ram_gib == 4512
+    assert plan.compute.worker_groups == [
+        {"flavor": "m1.benchmark-4c-mem", "count": 282, "vcpus": 1128, "ram_gib": 4512}
+    ]
