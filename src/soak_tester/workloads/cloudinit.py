@@ -48,6 +48,7 @@ BLOCK_SIZE = {json.dumps(config.workloads.storage.block_size)}
 RWMIXREAD = {config.workloads.storage.rwmixread}
 SERVER_PROCS = []
 PARSED_IPERF_FILES = set()
+LAST_CPU_SAMPLE = None
 
 
 def post(path, payload):
@@ -97,6 +98,40 @@ def metric(plane, name, value, unit, tags=None):
 
 def has_command(name):
     return subprocess.call(['which', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def _read_cpu_times():
+    parts = open('/proc/stat').readline().split()[1:]
+    values = [int(value) for value in parts]
+    idle = values[3] + values[4]
+    return sum(values), idle
+
+
+def sample_system_metrics():
+    global LAST_CPU_SAMPLE
+    metrics = []
+    try:
+        current = _read_cpu_times()
+        if LAST_CPU_SAMPLE is not None:
+            total_delta = current[0] - LAST_CPU_SAMPLE[0]
+            idle_delta = current[1] - LAST_CPU_SAMPLE[1]
+            if total_delta > 0:
+                metrics.append(metric('compute', 'guest.cpu_percent', 100 * (1 - idle_delta / total_delta), 'percent'))
+        LAST_CPU_SAMPLE = current
+    except Exception:
+        pass
+    try:
+        meminfo = {{}}
+        for line in open('/proc/meminfo'):
+            key, value = line.split(':', 1)
+            meminfo[key] = float(value.strip().split()[0])
+        total = meminfo.get('MemTotal', 0)
+        available = meminfo.get('MemAvailable', 0)
+        if total > 0:
+            metrics.append(metric('compute', 'guest.memory_used_percent', 100 * (total - available) / total, 'percent'))
+    except Exception:
+        pass
+    post_many('/metrics', metrics)
 
 
 def start_workload():
@@ -270,6 +305,8 @@ while time.time() < end:
     }})
     if ROLE == 'network-sender':
         parse_iperf3_output()
+    if ROLE == 'compute':
+        sample_system_metrics()
     time.sleep(5)
 for active in flow_procs.values():
     if active.poll() is None:
