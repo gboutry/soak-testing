@@ -1899,8 +1899,8 @@
     {
       "id": 36,
       "type": "stat",
-      "title": "Aggregate host NIC RX",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "title": "Physical NIC RX",
+      "description": "Physical host NIC receive throughput only. Excludes bonds, bridges, VLAN devices, tunnels, tap/veth/LXC devices, and loopback to avoid counting the same packet at multiple Linux networking layers.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1918,7 +1918,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "RX",
           "range": false,
           "instant": true,
@@ -1960,8 +1960,8 @@
     {
       "id": 37,
       "type": "stat",
-      "title": "Aggregate host NIC TX",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "title": "Physical NIC TX",
+      "description": "Physical host NIC transmit throughput only. Excludes bonds, bridges, VLAN devices, tunnels, tap/veth/LXC devices, and loopback to avoid counting the same packet at multiple Linux networking layers.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1979,7 +1979,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "TX",
           "range": false,
           "instant": true,
@@ -2021,8 +2021,8 @@
     {
       "id": 38,
       "type": "stat",
-      "title": "Aggregate RX+TX",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "title": "VM vNIC RX+TX",
+      "description": "Guest-facing virtual NIC throughput from libvirt domain counters. This is the VM edge view and should not be added to physical NIC or OVS interface totals.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2040,7 +2040,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval]) + rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(libvirt_domain_interface_stats_receive_bytes_total{domain=~\"$domain\"}[$__rate_interval]) + rate(libvirt_domain_interface_stats_transmit_bytes_total{domain=~\"$domain\"}[$__rate_interval])) * 8",
           "legendFormat": "RX+TX",
           "range": false,
           "instant": true,
@@ -2143,8 +2143,8 @@
     {
       "id": 40,
       "type": "timeseries",
-      "title": "RX/TX by host",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "title": "Physical NIC RX/TX by host",
+      "description": "Physical host NIC throughput by host. This is the wire-side view and intentionally excludes virtual and overlay devices.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2162,7 +2162,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "RX {{instance}}",
           "range": true,
           "instant": false,
@@ -2175,7 +2175,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "TX {{instance}}",
           "range": true,
           "instant": false,
@@ -2214,8 +2214,8 @@
     {
       "id": 41,
       "type": "timeseries",
-      "title": "RX/TX by host and device",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "title": "Physical NIC RX/TX by host and device",
+      "description": "Per-physical-NIC wire throughput. Use this panel to validate whether any physical NIC approaches line rate.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2233,7 +2233,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, device) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance, device) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "RX {{instance}} {{device}}",
           "range": true,
           "instant": false,
@@ -2246,7 +2246,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, device) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"$network_device\", device!~\"lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*|virbr.*|lxc.*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance, device) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
           "legendFormat": "TX {{instance}} {{device}}",
           "range": true,
           "instant": false,
@@ -2486,7 +2486,7 @@
       "id": 46,
       "type": "timeseries",
       "title": "OVS interface RX/TX",
-      "description": "Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput. Uses OVS exporter counters joined to `ovs_interface` for readable names when available.",
+      "description": "OVS interface counters are a virtual switching breakdown. Do not sum this panel with physical NIC or VM vNIC totals; the same packet can appear on patch, tunnel, bridge, and VM-facing interfaces.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
