@@ -39,8 +39,9 @@ from soak_tester.run.collect import (
 from soak_tester.run.provision import provision_openstack_run
 from soak_tester.run.status import read_status
 from soak_tester.state import initial_state, load_state, save_state
-from soak_tester.util import duration_seconds, ensure_dir, make_run_id, utcnow_iso
+from soak_tester.util import duration_seconds, ensure_dir, make_run_id, read_json, utcnow_iso
 from soak_tester.workloads.api import ApiWorkload
+from soak_tester.workloads.api_rally import run_rally_api_workload
 
 console = Console()
 app = typer.Typer(help="OpenStack-native soak-load testing tool.")
@@ -184,7 +185,20 @@ def run(
     save_state(run_dir, state)
     events.write(level="info", plane="control", event="run_started")
     duration_s = duration_seconds(duration)
-    if cfg.workloads.api.enabled and soak_plan.api.target_ops_per_second > 0:
+    if (
+        cfg.workloads.api.enabled
+        and cfg.workloads.api.engine == "rally"
+        and soak_plan.api.target_ops_per_second > 0
+    ):
+        _run_rally_api_with_periodic_collection(
+            run_dir=run_dir,
+            state=state,
+            cfg=cfg,
+            duration_s=duration_s,
+            metrics=metrics,
+            events=events,
+        )
+    elif cfg.workloads.api.enabled and soak_plan.api.target_ops_per_second > 0:
         api_workload = ApiWorkload(
             conn=provision_result["project_conn"],
             operation_mix=cfg.workloads.api.operation_mix,
@@ -240,6 +254,45 @@ def _run_api_workload_with_periodic_collection(
             errors.append(exc)
 
     thread = threading.Thread(target=target, name="soak-api-workload")
+    thread.start()
+    while thread.is_alive():
+        thread.join(timeout=interval_seconds)
+        _collect_controller_periodic(run_dir, state)
+    if errors:
+        raise errors[0]
+
+
+def _run_rally_api_with_periodic_collection(
+    *,
+    run_dir: Path,
+    state,
+    cfg,
+    duration_s: int,
+    metrics: MetricWriter,
+    events: EventWriter,
+    interval_seconds: int = 60,
+) -> None:
+    errors: list[BaseException] = []
+
+    def target() -> None:
+        try:
+            auth = read_json(run_dir / "auth.json")
+            run_rally_api_workload(
+                run_dir=run_dir,
+                auth=auth,
+                duration_seconds=duration_s,
+                concurrency=cfg.workloads.api.rally_concurrency,
+                times=cfg.workloads.api.rally_times,
+                volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
+                include_create_delete=cfg.workloads.api.rally_include_create_delete,
+                error_rate_max=cfg.workloads.api.rally_error_rate_max,
+                metric_writer=metrics,
+                event_writer=events,
+            )
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread.
+            errors.append(exc)
+
+    thread = threading.Thread(target=target, name="soak-api-rally-workload")
     thread.start()
     while thread.is_alive():
         thread.join(timeout=interval_seconds)
@@ -433,6 +486,105 @@ def calibrate_network(
     console.print(f"Network calibration artifacts written to {run_dir}")
 
 
+@calibrate_app.command("api")
+def calibrate_api(
+    os_cloud: Annotated[str, typer.Option("--os-cloud")],
+    config: Annotated[Path, typer.Option("--config", exists=True)],
+    duration: Annotated[str, typer.Option("--duration")] = "10m",
+    max_concurrency: Annotated[int, typer.Option("--max-concurrency", min=1)] = 32,
+) -> None:
+    """Run a Rally API calibration ramp and write a recommended profile."""
+    run_dir = _create_run_dir()
+    cfg = load_config(config)
+    cfg.workloads.api.engine = "rally"
+    conn = admin_connection(os_cloud)
+    _prepare_openstack_context(conn, cfg)
+    events = EventWriter(run_dir / "events.jsonl", run_dir.name)
+    metrics = MetricWriter(run_dir / "metrics.jsonl", run_dir.name)
+    _write_run_config(run_dir, config, cfg)
+    auth = {
+        "auth_url": conn.config.auth.get("auth_url"),
+        "username": conn.config.auth.get("username"),
+        "password": conn.config.auth.get("password"),
+        "project_name": conn.config.auth.get("project_name")
+        or conn.config.auth.get("tenant_name"),
+        "user_domain_name": conn.config.auth.get("user_domain_name", cfg.openstack.user_domain_name),
+        "project_domain_name": conn.config.auth.get(
+            "project_domain_name",
+            cfg.openstack.project_domain_name,
+        ),
+        "region_name": getattr(conn.config, "region_name", None),
+        "interface": getattr(conn.config, "interface", None),
+    }
+    selected = None
+    attempts = []
+    for concurrency in _api_calibration_steps(max_concurrency):
+        step_dir = ensure_dir(run_dir / "api-rally" / f"concurrency-{concurrency:03d}")
+        step_run_dir = step_dir.parent.parent
+        del step_run_dir
+        cfg.workloads.api.rally_concurrency = concurrency
+        events.write(
+            level="info",
+            plane="api",
+            event="api_calibration_step_started",
+            details={"concurrency": concurrency},
+        )
+        try:
+            summary = run_rally_api_workload(
+                run_dir=run_dir,
+                auth=auth,
+                duration_seconds=duration_seconds(duration),
+                concurrency=concurrency,
+                times=None,
+                volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
+                include_create_delete=cfg.workloads.api.rally_include_create_delete,
+                error_rate_max=cfg.workloads.api.rally_error_rate_max,
+                metric_writer=metrics,
+                event_writer=events,
+            )
+        except Exception as exc:
+            attempts.append({"concurrency": concurrency, "status": "failed", "error": str(exc)})
+            break
+        record = {
+            "concurrency": concurrency,
+            "status": "passed" if summary.errors == 0 else "failed",
+            "success_ops_per_second": summary.success_ops_per_second,
+            "total_ops_per_second": summary.total_ops_per_second,
+            "errors": summary.errors,
+            "error_rate": summary.error_rate,
+            "latency_p95_ms": summary.latency_p95_ms,
+            "latency_p99_ms": summary.latency_p99_ms,
+        }
+        attempts.append(record)
+        if summary.errors == 0:
+            selected = record
+        else:
+            break
+    recommended = cfg.model_dump(mode="json")
+    if selected:
+        recommended["workloads"]["api"]["rally_concurrency"] = selected["concurrency"]
+        recommended["capacity"]["api"]["ops_per_second"] = selected["success_ops_per_second"]
+    calibration = {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "engine": "rally",
+        "duration": duration,
+        "selected": selected,
+        "attempts": attempts,
+        "generated_config_file": "recommended-profile.yaml",
+    }
+    (run_dir / "api-calibration.json").write_text(
+        json.dumps(calibration, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "recommended-profile.yaml").write_text(
+        yaml.safe_dump(recommended, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"API calibration written to {run_dir / 'api-calibration.json'}")
+    console.print(f"Recommended profile written to {run_dir / 'recommended-profile.yaml'}")
+
+
 @calibrate_app.command("cloud")
 def calibrate_cloud(
     os_cloud: Annotated[str, typer.Option("--os-cloud")],
@@ -501,7 +653,7 @@ def calibrate_profile(
     )
     write_calibration_profile(run_dir, profile, tuned_config)
     console.print(f"Calibration profile written to {run_dir / 'calibration-profile.json'}")
-    console.print(f"Tuned config written to {run_dir / 'tuned-config.yaml'}")
+    console.print(f"Recommended profile written to {run_dir / 'recommended-profile.yaml'}")
 
 
 def _create_run_dir() -> Path:
@@ -555,6 +707,14 @@ def _print_checks(checks: list[tuple[str, str]]) -> None:
     for check, status_value in checks:
         table.add_row(check, status_value)
     console.print(table)
+
+
+def _api_calibration_steps(max_concurrency: int) -> list[int]:
+    candidates = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64]
+    steps = [value for value in candidates if value <= max_concurrency]
+    if max_concurrency not in steps:
+        steps.append(max_concurrency)
+    return steps
 
 
 def _print_status(payload: dict[str, object]) -> None:

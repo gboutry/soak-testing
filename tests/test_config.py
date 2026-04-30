@@ -13,6 +13,7 @@ def test_load_config_accepts_example_schema():
     config = load_config(FIXTURE)
 
     assert config.boot_concurrency == 1
+    assert config.workloads.api.engine == "native"
     assert config.openstack.external_network == "ext-net"
     assert config.capacity.compute.cpu_resource_class == "auto"
     assert config.capacity.compute.ram_resource_class == "MEMORY_MB"
@@ -132,6 +133,47 @@ workloads:
 
     with pytest.raises(ValueError, match="positive integer"):
         load_config(path)
+
+
+def test_api_workload_accepts_rally_engine(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+workloads:
+  api:
+    engine: rally
+    rally_concurrency: 12
+    rally_times: 120
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.workloads.api.engine == "rally"
+    assert config.workloads.api.rally_concurrency == 12
+    assert config.workloads.api.rally_times == 120
 
 
 @pytest.mark.parametrize(

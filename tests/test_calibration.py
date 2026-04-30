@@ -2,7 +2,11 @@ from pathlib import Path
 
 import json
 
-from soak_tester.calibration import build_calibration_profile, discover_cloud_capacity
+from soak_tester.calibration import (
+    build_calibration_profile,
+    discover_cloud_capacity,
+    write_calibration_profile,
+)
 from soak_tester.config import load_config
 from soak_tester.planner import FlavorSpec
 
@@ -184,6 +188,28 @@ def test_profile_derates_missed_validation_planes_once(tmp_path):
     assert profile["exercisable_capacity"]["api"]["ops_per_second"] == 75
     assert tuned_config["capacity"]["network"]["gbps"] == 300
     assert tuned_config["capacity"]["network"]["per_host_gbps"] == 100
+
+
+def test_calibration_profile_writes_operator_ready_recommended_profile(tmp_path):
+    profile = {
+        "schema_version": 1,
+        "target_percent": 80,
+        "pass_ratio": 0.95,
+        "derate_policy": "auto_once",
+        "network_direction": "egress",
+        "plane_results": {},
+        "exercisable_capacity": {},
+        "generated_config_file": "recommended-profile.yaml",
+    }
+    recommended_config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+
+    write_calibration_profile(tmp_path, profile, recommended_config.model_dump(mode="json"))
+
+    assert (tmp_path / "calibration-profile.json").exists()
+    assert (tmp_path / "recommended-profile.md").exists()
+    generated = tmp_path / "recommended-profile.yaml"
+    assert generated.exists()
+    assert load_config(generated).openstack.external_network == "ext-net"
 
 
 def _flavors() -> dict[str, FlavorSpec]:

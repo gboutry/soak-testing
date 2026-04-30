@@ -32,6 +32,7 @@ soak-tester plan --os-cloud admin --config config.yaml --target 80
 soak-tester run --os-cloud admin --config config.yaml --target 80 --duration 8h
 soak-tester calibrate cloud --os-cloud admin --config config.yaml
 soak-tester calibrate profile --os-cloud admin --config config.yaml --target 80
+soak-tester calibrate api --os-cloud admin --config config.yaml --duration 10m
 soak-tester calibrate network --os-cloud admin --config config.yaml --duration 10m
 soak-tester status --run runs/soak-20260429-143000
 soak-tester cleanup --run runs/soak-20260429-143000 --dry-run
@@ -94,15 +95,40 @@ Calibration will then write total compute RAM as
 `per_host_ram_gib * discovered_compute_hosts`.
 
 Network bandwidth, storage performance, and API throughput are not reliably
-advertised by vanilla OpenStack APIs. The calibration report records configured
-assumptions for those planes until workload probes replace them.
+advertised by vanilla OpenStack APIs. Calibration commands write workload
+evidence and an operator-ready `recommended-profile.yaml`. That YAML file is a
+normal benchmark profile: review it, rename or commit it, then pass it directly
+to `soak-tester plan` and `soak-tester run`.
 
 `soak-tester calibrate profile` turns inventory and optional validation-run
-evidence into a tuned workload profile. It writes `calibration-profile.json`,
-`calibration-profile.md`, and `tuned-config.yaml`. The profile distinguishes
-OpenStack inventory from the exercisable workload envelope, applies a default
-`0.95` pass ratio, models network capacity as per-host egress, and can derate
-planes once when a validation run misses the requested target.
+evidence into a recommended benchmark profile. It writes
+`calibration-profile.json`, `calibration-profile.md`,
+`recommended-profile.md`, and `recommended-profile.yaml`. The profile
+distinguishes OpenStack inventory from the exercisable workload envelope,
+applies a default `0.95` pass ratio, models network capacity as per-host
+egress, and can derate planes once when a validation run misses the requested
+target.
+
+## API Workload
+
+The API plane supports two engines:
+
+```yaml
+workloads:
+  api:
+    engine: rally
+    rally_concurrency: 32
+    rally_times: null
+    rally_include_create_delete: true
+```
+
+`engine: rally` runs Rally on the host where `soak-tester` is executed and
+normalizes Rally results into `metrics.jsonl` and `final-report.*`. Rally is an
+optional runtime dependency; install `rally` and `rally-openstack` on the
+runner host before using this engine. The default Rally task currently uses
+token validation and list operations for Nova, Neutron, and Cinder. It avoids
+create/delete scenarios in the full-soak API mix because Rally-managed tenants
+need quota handling before those operations are reproducible.
 
 ## Artifact Layout
 

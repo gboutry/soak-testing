@@ -144,7 +144,7 @@ def build_calibration_profile(
         "initial_exercisable_capacity": exercisable,
         "plane_results": plane_results,
         "validation_runs": [str(path) for path in validation_runs],
-        "generated_config_file": "tuned-config.yaml",
+        "generated_config_file": "recommended-profile.yaml",
         "notes": [
             "Inventory capacity is OpenStack/Placement/operator-declared.",
             "Exercisable capacity is the envelope the configured flavors and workload model can drive.",
@@ -154,7 +154,11 @@ def build_calibration_profile(
     return profile, generated_config
 
 
-def write_calibration_profile(run_dir: Path, profile: dict[str, Any], tuned_config: dict[str, Any]) -> None:
+def write_calibration_profile(
+    run_dir: Path,
+    profile: dict[str, Any],
+    recommended_config: dict[str, Any],
+) -> None:
     (run_dir / "calibration-profile.json").write_text(
         _json_dumps(profile),
         encoding="utf-8",
@@ -163,8 +167,12 @@ def write_calibration_profile(run_dir: Path, profile: dict[str, Any], tuned_conf
         render_calibration_profile_markdown(profile),
         encoding="utf-8",
     )
-    (run_dir / "tuned-config.yaml").write_text(
-        yaml.safe_dump(tuned_config, sort_keys=False),
+    (run_dir / "recommended-profile.md").write_text(
+        render_recommended_profile_markdown(profile),
+        encoding="utf-8",
+    )
+    (run_dir / "recommended-profile.yaml").write_text(
+        yaml.safe_dump(recommended_config, sort_keys=False),
         encoding="utf-8",
     )
 
@@ -196,6 +204,35 @@ def render_calibration_profile_markdown(profile: dict[str, Any]) -> str:
             "",
             "This profile distinguishes OpenStack inventory from the exercisable workload envelope. "
             "A target is achieved only when every plane reaches the requested fraction within the pass band.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_recommended_profile_markdown(profile: dict[str, Any]) -> str:
+    lines = [
+        "# soak-tester recommended benchmark profile",
+        "",
+        f"Generated config: `{profile.get('generated_config_file', 'recommended-profile.yaml')}`",
+        f"Target used for validation: `{profile['target_percent']}%`",
+        "",
+        "Copy or rename `recommended-profile.yaml` to a benchmark profile name, review it, "
+        "and use it directly with `soak-tester plan` and `soak-tester run`.",
+        "",
+        "## Plane Status",
+        "",
+    ]
+    for plane, result in profile.get("plane_results", {}).items():
+        lines.append(
+            f"- {plane}: {result['status']} "
+            f"(requested={result['requested']}, observed={result.get('observed')})"
+        )
+    lines.extend(
+        [
+            "",
+            "The YAML profile is the runtime input. Calibration reports are evidence; "
+            "they are not separate runtime tuning files.",
             "",
         ]
     )
@@ -353,7 +390,13 @@ def _config_with_exercisable_capacity(config: SoakConfig, exercisable: dict[str,
     payload["capacity"]["storage"]["write_gbps"] = float(exercisable["storage"]["write_gbps"])
     payload["capacity"]["storage"]["iops"] = int(exercisable["storage"]["iops"])
     payload["capacity"]["api"]["ops_per_second"] = float(exercisable["api"]["ops_per_second"])
+    payload["workloads"]["api"]["engine"] = "rally"
     payload["workloads"]["api"]["run_from"] = "controller"
+    payload["workloads"]["api"]["rally_concurrency"] = max(
+        1,
+        int(round(float(exercisable["api"]["ops_per_second"]))),
+    )
+    payload["workloads"]["api"]["rally_times"] = None
     return payload
 
 

@@ -82,9 +82,14 @@ class CapacityConfig(BaseModel):
 
 class ApiWorkloadConfig(BaseModel):
     enabled: bool = True
+    engine: Literal["native", "rally"] = "native"
     run_from: Literal["local", "controller"] = "local"
     operation_mix: dict[str, int] = Field(default_factory=dict)
     create_delete_volume_size_gib: int = 1
+    rally_concurrency: int = Field(default=1, ge=1)
+    rally_times: int | None = Field(default=None, ge=1)
+    rally_include_create_delete: bool = False
+    rally_error_rate_max: float = Field(default=0.0, ge=0, le=100)
 
     @field_validator("operation_mix")
     @classmethod

@@ -19,6 +19,12 @@ dependencies = [
     "ruff>=0.5",
 ]
 
+[project.optional-dependencies]
+api-rally = [
+    "rally>=4",
+    "rally-openstack>=3",
+]
+
 [project.scripts]
 soak-tester = "soak_tester.cli:main"
 

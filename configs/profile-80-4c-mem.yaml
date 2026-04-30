@@ -1,0 +1,146 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-mixed-benchmark
+  ssh_user: ubuntu
+  member_role: member
+
+management:
+  mode: floating_ip
+  controller_floating_ip: true
+  allowed_cidrs:
+    - 0.0.0.0/0
+  ssh_private_key_path: null
+
+resources:
+  project_prefix: soak-tester
+  create_project: true
+  create_project_user: true
+  create_router: true
+  network_cidr: 10.250.0.0/22
+  floating_ips:
+    controller: true
+    workers: false
+
+flavors:
+  controller: m1.benchmark
+  compute_worker: m1.benchmark-4c-mem
+  network_worker: m1.benchmark
+  storage_worker: m1.benchmark
+  api_worker: m1.benchmark
+
+capacity:
+  compute:
+    vcpus: 1200
+    ram_gib: 4800
+    cpu_resource_class: PCPU
+    ram_resource_class: MEMORY_MB
+
+  network:
+    gbps: 130.804384
+    scope: per_host
+    per_host_gbps: 43.601461
+
+  storage:
+    read_gbps: 4.150454
+    write_gbps: 1.785527
+    iops: 126662
+
+  api:
+    ops_per_second: 40
+
+workloads:
+  api:
+    enabled: true
+    engine: rally
+    run_from: local
+    rally_concurrency: 32
+    rally_times: null
+    rally_include_create_delete: false
+    rally_error_rate_max: 0
+    operation_mix:
+      list_servers: 40
+      list_ports: 30
+      list_volumes: 20
+      create_delete_ports: 10
+
+  compute:
+    enabled: true
+    cpu_load_percent: 95
+    memory_load_percent: 95
+    flavor_mix:
+      - m1.benchmark-4c-mem
+
+  network:
+    enabled: true
+    protocol: tcp
+    tool: iperf3
+    topology: full_mesh
+    flow_duration: 60s
+    parallel_streams_per_flow: 4
+    target_gbps_per_flow: 1.1
+    sender_worker_target_gbps: 4.37
+    receiver_worker_target_gbps: 4.37
+    receiver_port_base: 5201
+    max_flows: 1000
+    max_workers: 300
+
+  storage:
+    enabled: true
+    volume_type: __DEFAULT__
+    volume_size_gib: 10
+    profile: mixed-randrw
+    block_size: 4k
+    iodepth: 32
+    numjobs: 4
+    rwmixread: 70
+    worker_count: 12
+
+monitoring:
+  live_status:
+    enabled: true
+    refresh_interval: 5s
+  worker_metrics:
+    enabled: true
+    interval: 5s
+
+observability:
+  enabled: true
+  prometheus:
+    enabled: true
+    url: http://prometheus.example.internal:9090
+    timeout: 30s
+    query_step: 15s
+    auth:
+      type: none
+      token_file: null
+      username: null
+      password_env: null
+    tls:
+      verify: true
+      ca_file: null
+    labels:
+      host_label: instance
+      hostname_label: hostname
+    network:
+      enabled: true
+      device_regex: bond.*|eno.*|ens.*|eth.*
+      exclude_device_regex: lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*
+    query_packs:
+      - node-exporter-network
+
+run:
+  warmup: 5m
+  cooldown: 2m
+  failure_budget: 5
+  stop_on_error: false
+  leave_running: false
+  cleanup_on_success: true
+
+boot_concurrency: 36
+
+calibration:
+  pass_ratio: 0.95
+  ramp_duration: 3m
+  validation_duration: 10m
+  derate_policy: auto_once
+  network_direction: egress
