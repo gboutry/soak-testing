@@ -377,6 +377,7 @@ def provision_openstack_run(
                     index,
                     controller_url,
                     worker_duration_s,
+                    duration_s,
                     receiver_ports=[
                         flow.receiver_port
                         for flow in plan.network.flow_assignments
@@ -418,6 +419,7 @@ def provision_openstack_run(
                     index,
                     controller_url,
                     worker_duration_s,
+                    duration_s,
                     peers=receiver_ips,
                     flow_assignments=[
                         {
@@ -468,6 +470,7 @@ def provision_openstack_run(
                         index,
                         controller_url,
                         worker_duration_s,
+                        duration_s,
                         flavor_name_override=flavor,
                     ),
                 )
@@ -494,6 +497,7 @@ def provision_openstack_run(
                     index,
                     controller_url,
                     worker_duration_s,
+                    duration_s,
                 ),
             )
             for index in range(plan.storage.worker_count)
@@ -522,6 +526,7 @@ def _create_worker(
     index: int,
     controller_url: str,
     duration_seconds_value: int,
+    workload_duration_seconds_value: int | None = None,
     peers: list[str] | None = None,
     flow_assignments: list[dict[str, Any]] | None = None,
     receiver_ports: list[int] | None = None,
@@ -552,6 +557,7 @@ def _create_worker(
             worker_id=worker_id,
             controller_url=controller_url,
             duration_seconds=duration_seconds_value,
+            workload_duration_seconds=workload_duration_seconds_value,
             peers=peers,
             flow_assignments=flow_assignments,
             receiver_ports=receiver_ports,
@@ -590,6 +596,7 @@ def _create_storage_worker(
     index: int,
     controller_url: str,
     duration_seconds_value: int,
+    workload_duration_seconds_value: int | None = None,
 ) -> Any:
     worker = _create_worker(
         conn,
@@ -608,6 +615,7 @@ def _create_storage_worker(
         index,
         controller_url,
         duration_seconds_value,
+        workload_duration_seconds_value,
     )
     storage_meta = owned_metadata(run_id, "storage", "volume", project_name)
     volume = conn.block_storage.create_volume(

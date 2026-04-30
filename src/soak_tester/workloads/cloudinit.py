@@ -12,6 +12,7 @@ def worker_cloud_init(
     worker_id: str,
     controller_url: str,
     duration_seconds: int,
+    workload_duration_seconds: int | None = None,
     peers: list[str] | None = None,
     flow_assignments: list[dict[str, object]] | None = None,
     receiver_ports: list[int] | None = None,
@@ -19,6 +20,7 @@ def worker_cloud_init(
     peers = peers or []
     flow_assignments = flow_assignments or []
     receiver_ports = receiver_ports or []
+    workload_duration_seconds = workload_duration_seconds or duration_seconds
     script = f"""#!/bin/bash
 set -eux
 mkdir -p /var/log/soak-tester
@@ -33,7 +35,8 @@ import urllib.request
 ROLE = {json.dumps(role)}
 WORKER_ID = {json.dumps(worker_id)}
 CONTROLLER = {json.dumps(controller_url)}
-DURATION = {duration_seconds}
+AGENT_DURATION = {duration_seconds}
+WORKLOAD_DURATION = {workload_duration_seconds}
 PEERS = {json.dumps(peers)}
 FLOW_ASSIGNMENTS = {json.dumps(flow_assignments)}
 RECEIVER_PORTS = {json.dumps(receiver_ports)}
@@ -140,7 +143,7 @@ def start_workload():
             return subprocess.Popen([
                 'stress-ng', '--cpu', '0', '--cpu-load', str(CPU_LOAD),
                 '--vm', '1', '--vm-bytes', str(MEMORY_LOAD) + '%',
-                '--timeout', str(DURATION),
+                '--timeout', str(WORKLOAD_DURATION),
             ])
         return subprocess.Popen(['sh', '-c', 'yes >/dev/null'])
     if ROLE == 'network-receiver':
@@ -162,7 +165,7 @@ def start_workload():
         device = next((p for p in ['/dev/vdb', '/dev/disk/by-id/virtio-soak'] if os.path.exists(p)), '/dev/vdb')
         return subprocess.Popen([
             'fio', '--name=workload', '--ioengine=libaio', '--direct=1',
-            '--time_based=1', '--runtime', str(DURATION), '--group_reporting=1',
+            '--time_based=1', '--runtime', str(WORKLOAD_DURATION), '--group_reporting=1',
             '--iodepth', str(IODEPTH), '--numjobs', str(NUMJOBS), '--bs', BLOCK_SIZE,
             '--rw=randrw', '--rwmixread', str(RWMIXREAD), '--filename', device,
             '--output-format=json',
@@ -257,13 +260,15 @@ def parse_fio_output():
         post('/events', event('warning', 'storage', 'fio_parse_failed', {{'error': str(exc)}}))
 
 
-end = time.time() + DURATION
+agent_end = time.time() + AGENT_DURATION
+workload_end = time.time() + WORKLOAD_DURATION
 proc = start_workload()
+storage_parsed = False
 flow_index = 0
 flow_procs = {{}}
 flow_attempts = {{}}
-while time.time() < end:
-    if ROLE == 'network-sender' and has_command('iperf3'):
+while time.time() < agent_end:
+    if ROLE == 'network-sender' and has_command('iperf3') and time.time() < workload_end:
         assignments = FLOW_ASSIGNMENTS or [
             {{
                 'flow_id': 'legacy-flow-00000',
@@ -278,7 +283,7 @@ while time.time() < end:
             active = flow_procs.get(flow_id)
             if active is not None and active.poll() is None:
                 continue
-            remaining = int(end - time.time())
+            remaining = int(workload_end - time.time())
             if remaining > 1:
                 flow_time = max(1, min(FLOW_TIME, remaining))
                 attempt = flow_attempts.get(flow_id, 0)
@@ -307,6 +312,9 @@ while time.time() < end:
         parse_iperf3_output()
     if ROLE == 'compute':
         sample_system_metrics()
+    if ROLE == 'storage' and proc is not None and proc.poll() is not None and not storage_parsed:
+        parse_fio_output()
+        storage_parsed = True
     time.sleep(5)
 for active in flow_procs.values():
     if active.poll() is None:
@@ -321,7 +329,7 @@ if proc is not None and proc.poll() is None and ROLE not in ('network-receiver',
         proc.terminate()
 if ROLE == 'network-sender':
     parse_iperf3_output()
-if ROLE == 'storage':
+if ROLE == 'storage' and not storage_parsed:
     parse_fio_output()
 if proc is not None and proc.poll() is None:
     proc.terminate()
