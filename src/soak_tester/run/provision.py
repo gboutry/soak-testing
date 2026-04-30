@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -24,13 +26,19 @@ class ResourceTracker:
         self.run_dir = run_dir
         self.path = run_dir / "resources.json"
         self.resources: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
         self.flush()
 
     def add(self, record: dict[str, Any]) -> None:
-        self.resources.append(record)
-        self.flush()
+        with self._lock:
+            self.resources.append(record)
+            self._flush_unlocked()
 
     def flush(self) -> None:
+        with self._lock:
+            self._flush_unlocked()
+
+    def _flush_unlocked(self) -> None:
         atomic_write_json(self.path, {"resources": self.resources})
 
 
@@ -294,6 +302,7 @@ def provision_openstack_run(
     )
     image = project_conn.image.find_image(config.openstack.image)
     placement: list[dict[str, Any]] = []
+    placement_lock = threading.Lock()
     controller = _boot_server(
         project_conn,
         name=f"{project_name}-controller",
@@ -347,132 +356,150 @@ def provision_openstack_run(
     worker_duration_s = duration_s + 3600
     receiver_ips: list[str] = []
     receiver_ip_by_worker_id: dict[str, str] = {}
-    receiver_servers = []
-    for index in range(plan.network.receiver_count):
+    receiver_servers = _run_boot_tasks(
+        [
+            (
+                f"network-receiver-{index:03d}",
+                lambda index=index: _create_worker(
+                    project_conn,
+                    tracker,
+                    placement,
+                    placement_lock,
+                    run_id,
+                    project_name,
+                    config,
+                    image.id,
+                    network.id,
+                    security_group.name,
+                    keypair.name,
+                    "network",
+                    "network-receiver",
+                    index,
+                    controller_url,
+                    worker_duration_s,
+                    receiver_ports=[
+                        flow.receiver_port
+                        for flow in plan.network.flow_assignments
+                        if flow.receiver_worker_id == f"network-receiver-{index:03d}"
+                    ],
+                    planned_host=plan.network.receiver_worker_hosts.get(
+                        f"network-receiver-{index:03d}"
+                    ),
+                ),
+            )
+            for index in range(plan.network.receiver_count)
+        ],
+        concurrency=config.boot_concurrency,
+    )
+    for index, server in enumerate(receiver_servers):
         worker_id = f"network-receiver-{index:03d}"
-        server = _create_worker(
-            project_conn,
-            tracker,
-            placement,
-            run_id,
-            project_name,
-            config,
-            image.id,
-            network.id,
-            security_group.name,
-            keypair.name,
-            "network",
-            "network-receiver",
-            index,
-            controller_url,
-            worker_duration_s,
-            receiver_ports=[
-                flow.receiver_port
-                for flow in plan.network.flow_assignments
-                if flow.receiver_worker_id == worker_id
-            ],
-            planned_host=plan.network.receiver_worker_hosts.get(worker_id),
-        )
-        receiver_servers.append(server)
         if ip := server_private_ip(server):
             receiver_ips.append(ip)
             receiver_ip_by_worker_id[worker_id] = ip
 
-    for index in range(plan.network.sender_count):
-        worker_id = f"network-sender-{index:03d}"
-        _create_worker(
-            project_conn,
-            tracker,
-            placement,
-            run_id,
-            project_name,
-            config,
-            image.id,
-            network.id,
-            security_group.name,
-            keypair.name,
-            "network",
-            "network-sender",
-            index,
-            controller_url,
-            worker_duration_s,
-            peers=receiver_ips,
-            flow_assignments=[
-                {
-                    **flow.model_dump(mode="json"),
-                    "receiver_private_ip": receiver_ip_by_worker_id.get(flow.receiver_worker_id),
-                }
-                for flow in plan.network.flow_assignments
-                if flow.sender_worker_id == worker_id
-            ],
-            planned_host=plan.network.sender_worker_hosts.get(worker_id),
-        )
+    _run_boot_tasks(
+        [
+            (
+                f"network-sender-{index:03d}",
+                lambda index=index: _create_worker(
+                    project_conn,
+                    tracker,
+                    placement,
+                    placement_lock,
+                    run_id,
+                    project_name,
+                    config,
+                    image.id,
+                    network.id,
+                    security_group.name,
+                    keypair.name,
+                    "network",
+                    "network-sender",
+                    index,
+                    controller_url,
+                    worker_duration_s,
+                    peers=receiver_ips,
+                    flow_assignments=[
+                        {
+                            **flow.model_dump(mode="json"),
+                            "receiver_private_ip": receiver_ip_by_worker_id.get(
+                                flow.receiver_worker_id
+                            ),
+                        }
+                        for flow in plan.network.flow_assignments
+                        if flow.sender_worker_id == f"network-sender-{index:03d}"
+                    ],
+                    planned_host=plan.network.sender_worker_hosts.get(
+                        f"network-sender-{index:03d}"
+                    ),
+                ),
+            )
+            for index in range(plan.network.sender_count)
+        ],
+        concurrency=config.boot_concurrency,
+    )
 
     compute_index = 0
+    compute_tasks: list[tuple[str, Callable[[], Any]]] = []
     compute_groups = plan.compute.worker_groups or [
         {"flavor": config.flavors.compute_worker, "count": plan.compute.worker_count}
     ]
     for group in compute_groups:
         for _ in range(int(group["count"])):
-            _create_worker(
-                project_conn,
-                tracker,
-                placement,
-                run_id,
-                project_name,
-                config,
-                image.id,
-                network.id,
-                security_group.name,
-                keypair.name,
-                "compute",
-                "compute",
-                compute_index,
-                controller_url,
-                worker_duration_s,
-                flavor_name_override=str(group["flavor"]),
+            index = compute_index
+            flavor = str(group["flavor"])
+            compute_tasks.append(
+                (
+                    f"compute-{index:03d}",
+                    lambda index=index, flavor=flavor: _create_worker(
+                        project_conn,
+                        tracker,
+                        placement,
+                        placement_lock,
+                        run_id,
+                        project_name,
+                        config,
+                        image.id,
+                        network.id,
+                        security_group.name,
+                        keypair.name,
+                        "compute",
+                        "compute",
+                        index,
+                        controller_url,
+                        worker_duration_s,
+                        flavor_name_override=flavor,
+                    ),
+                )
             )
             compute_index += 1
+    _run_boot_tasks(compute_tasks, concurrency=config.boot_concurrency)
 
-    for index in range(plan.storage.worker_count):
-        worker = _create_worker(
-            project_conn,
-            tracker,
-            placement,
-            run_id,
-            project_name,
-            config,
-            image.id,
-            network.id,
-            security_group.name,
-            keypair.name,
-            "storage",
-            "storage",
-            index,
-            controller_url,
-            worker_duration_s,
-        )
-        storage_meta = owned_metadata(run_id, "storage", "volume", project_name)
-        volume = project_conn.block_storage.create_volume(
-            name=f"{project_name}-storage-volume-{index:03d}",
-            size=config.workloads.storage.volume_size_gib,
-            volume_type=config.workloads.storage.volume_type,
-            metadata=storage_meta,
-        )
-        tracker.add(
-            resource_record(
-                "volume",
-                volume.id,
-                volume.name,
-                plane="storage",
-                role="volume",
-                metadata=storage_meta,
+    _run_boot_tasks(
+        [
+            (
+                f"storage-{index:03d}",
+                lambda index=index: _create_storage_worker(
+                    project_conn,
+                    tracker,
+                    placement,
+                    placement_lock,
+                    run_id,
+                    project_name,
+                    config,
+                    image.id,
+                    network.id,
+                    security_group.name,
+                    keypair.name,
+                    index,
+                    controller_url,
+                    worker_duration_s,
+                ),
             )
-        )
-        volume = project_conn.block_storage.wait_for_status(
-            volume, status="available", failures=["error"], wait=900
-        )
-        project_conn.compute.create_volume_attachment(worker, volumeId=volume.id)
+            for index in range(plan.storage.worker_count)
+        ],
+        concurrency=config.boot_concurrency,
+    )
 
     atomic_write_json(run_dir / "placement.json", placement)
     return {"controller_url": controller_url, "project_conn": project_conn, "tracker": tracker}
@@ -482,6 +509,7 @@ def _create_worker(
     conn: Any,
     tracker: ResourceTracker,
     placement: list[dict[str, Any]],
+    placement_lock: threading.Lock,
     run_id: str,
     project_name: str,
     config: SoakConfig,
@@ -542,8 +570,92 @@ def _create_worker(
         )
     )
     server = conn.compute.wait_for_server(server, status="ACTIVE", failures=["ERROR"], wait=900)
-    placement.append(placement_record(worker_id, server, plane=plane, role=role))
+    with placement_lock:
+        placement.append(placement_record(worker_id, server, plane=plane, role=role))
     return server
+
+
+def _create_storage_worker(
+    conn: Any,
+    tracker: ResourceTracker,
+    placement: list[dict[str, Any]],
+    placement_lock: threading.Lock,
+    run_id: str,
+    project_name: str,
+    config: SoakConfig,
+    image_id: str,
+    network_id: str,
+    security_group_name: str,
+    key_name: str,
+    index: int,
+    controller_url: str,
+    duration_seconds_value: int,
+) -> Any:
+    worker = _create_worker(
+        conn,
+        tracker,
+        placement,
+        placement_lock,
+        run_id,
+        project_name,
+        config,
+        image_id,
+        network_id,
+        security_group_name,
+        key_name,
+        "storage",
+        "storage",
+        index,
+        controller_url,
+        duration_seconds_value,
+    )
+    storage_meta = owned_metadata(run_id, "storage", "volume", project_name)
+    volume = conn.block_storage.create_volume(
+        name=f"{project_name}-storage-volume-{index:03d}",
+        size=config.workloads.storage.volume_size_gib,
+        volume_type=config.workloads.storage.volume_type,
+        metadata=storage_meta,
+    )
+    tracker.add(
+        resource_record(
+            "volume",
+            volume.id,
+            volume.name,
+            plane="storage",
+            role="volume",
+            metadata=storage_meta,
+        )
+    )
+    volume = conn.block_storage.wait_for_status(
+        volume, status="available", failures=["error"], wait=900
+    )
+    conn.compute.create_volume_attachment(worker, volumeId=volume.id)
+    return worker
+
+
+def _run_boot_tasks(
+    tasks: list[tuple[str, Callable[[], Any]]],
+    *,
+    concurrency: int,
+) -> list[Any]:
+    if not tasks:
+        return []
+    if concurrency <= 1 or len(tasks) == 1:
+        return [task() for _, task in tasks]
+    results: list[Any] = [None] * len(tasks)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_index = {
+            executor.submit(task): index
+            for index, (_, task) in enumerate(tasks)
+        }
+        for future in concurrent.futures.as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                name = tasks[index][0]
+                raise RuntimeError(f"worker boot failed for {name}") from exc
+    return results
 
 
 def _boot_server(

@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
+from soak_tester.calibration import build_calibrated_config, discover_cloud_capacity
 from soak_tester.cleanup import cleanup_run
 from soak_tester.config import dump_config, load_config
 from soak_tester.events import EventWriter, MetricWriter
@@ -372,6 +374,44 @@ def calibrate_network(
     if cfg.run.cleanup_on_success:
         cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
     console.print(f"Network calibration artifacts written to {run_dir}")
+
+
+@calibrate_app.command("cloud")
+def calibrate_cloud(
+    os_cloud: Annotated[str, typer.Option("--os-cloud")],
+    config: Annotated[Path, typer.Option("--config", exists=True)],
+) -> None:
+    """Discover OpenStack-advertised capacity and write calibration artifacts."""
+    run_dir = _create_run_dir()
+    cfg = load_config(config)
+    conn = admin_connection(os_cloud)
+    _prepare_openstack_context(conn, cfg)
+    calibration = discover_cloud_capacity(conn, cfg)
+    generated_config = build_calibrated_config(
+        config=cfg,
+        cpu_vcpus=int(calibration["generated_capacity"]["compute"]["vcpus"]),
+        memory_ram_gib=float(calibration["generated_capacity"]["compute"]["ram_gib"]),
+        cpu_resource_class=str(
+            calibration["generated_capacity"]["compute"]["cpu_resource_class"]
+        ),
+    )
+    (run_dir / "calibration.json").write_text(
+        json.dumps(calibration, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "calibrated-capacity.yaml").write_text(
+        yaml.safe_dump(generated_config, sort_keys=False),
+        encoding="utf-8",
+    )
+    console.print(f"Calibration written to {run_dir / 'calibration.json'}")
+    console.print(f"Generated config written to {run_dir / 'calibrated-capacity.yaml'}")
+    compute = calibration["compute"]["cpu"]["selected"]
+    memory = calibration["compute"]["memory"]
+    console.print(
+        "Compute: "
+        f"{compute['allocatable']} {compute['resource_class']} guest cores, "
+        f"{memory['allocatable_gib']} GiB RAM"
+    )
 
 
 def _create_run_dir() -> Path:

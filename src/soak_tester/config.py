@@ -52,6 +52,9 @@ class FlavorsConfig(BaseModel):
 class ComputeCapacity(BaseModel):
     vcpus: int
     ram_gib: float
+    cpu_resource_class: Literal["auto", "VCPU", "PCPU"] = "auto"
+    ram_resource_class: str = "MEMORY_MB"
+    per_host_ram_gib: float | None = None
 
 
 class NetworkCapacity(BaseModel):
@@ -231,6 +234,7 @@ class RunConfig(BaseModel):
 
 class SoakConfig(BaseModel):
     openstack: OpenStackConfig
+    boot_concurrency: int = Field(default=1, ge=1)
     management: ManagementConfig = Field(default_factory=ManagementConfig)
     resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
     flavors: FlavorsConfig

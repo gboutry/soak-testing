@@ -4,6 +4,8 @@ openstack:
   ssh_user: ubuntu
   member_role: member
 
+boot_concurrency: 1
+
 management:
   mode: floating_ip
   controller_floating_ip: true
@@ -32,6 +34,9 @@ capacity:
   compute:
     vcpus: 960
     ram_gib: 3072
+    cpu_resource_class: auto
+    ram_resource_class: MEMORY_MB
+    per_host_ram_gib: null
   network:
     gbps: 600
   storage:

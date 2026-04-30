@@ -30,6 +30,7 @@ provider networks, Ceph pools, Prometheus, or Grafana.
 soak-tester inspect --os-cloud admin --config config.yaml
 soak-tester plan --os-cloud admin --config config.yaml --target 80
 soak-tester run --os-cloud admin --config config.yaml --target 80 --duration 8h
+soak-tester calibrate cloud --os-cloud admin --config config.yaml
 soak-tester calibrate network --os-cloud admin --config config.yaml --duration 10m
 soak-tester status --run runs/soak-20260429-143000
 soak-tester cleanup --run runs/soak-20260429-143000 --dry-run
@@ -45,6 +46,8 @@ read/write/IOPS targets. Network can use either an aggregate target or a
 host-aware full mesh:
 
 ```yaml
+boot_concurrency: 12
+
 capacity:
   network:
     gbps: 200
@@ -62,6 +65,36 @@ workloads:
 With `scope: per_host`, `--target 80` means `160 Gbit/s` per selected compute
 host. If host names are not listed in config, `soak-tester` tries to discover
 enabled hypervisors with admin Nova credentials and records them in the plan.
+
+`soak-tester calibrate cloud` writes `runs/<run-id>/calibration.json` and
+`runs/<run-id>/calibrated-capacity.yaml`. Compute capacity is discovered from
+Placement inventories when available. On dedicated-CPU clouds, `PCPU` inventory
+is selected when `VCPU` inventory is zero, while `capacity.compute.vcpus` remains
+the guest-core count used by the planner:
+
+```yaml
+capacity:
+  compute:
+    vcpus: 1248
+    ram_gib: 2304
+    cpu_resource_class: PCPU
+```
+
+If benchmark flavors use huge pages and Placement exposes only generic
+`MEMORY_MB`, set the intended per-host memory envelope explicitly:
+
+```yaml
+capacity:
+  compute:
+    per_host_ram_gib: 2048
+```
+
+Calibration will then write total compute RAM as
+`per_host_ram_gib * discovered_compute_hosts`.
+
+Network bandwidth, storage performance, and API throughput are not reliably
+advertised by vanilla OpenStack APIs. The calibration report records configured
+assumptions for those planes until workload probes replace them.
 
 ## Artifact Layout
 
