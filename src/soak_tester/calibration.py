@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from soak_tester.config import SoakConfig
 from soak_tester.openstack_client.compute import list_hypervisor_names
+from soak_tester.planner import FlavorSpec, create_plan
+from soak_tester.util import read_json
 
 
 def discover_cloud_capacity(conn: Any, config: SoakConfig) -> dict[str, Any]:
@@ -79,6 +85,275 @@ def build_calibrated_config(
     if network.get("scope") == "per_host" and network.get("per_host_gbps") and host_count:
         network["gbps"] = float(network["per_host_gbps"]) * int(host_count)
     return payload
+
+
+def build_calibration_profile(
+    *,
+    config: SoakConfig,
+    cloud_calibration: dict[str, Any],
+    flavor_specs: dict[str, FlavorSpec],
+    target_percent: float,
+    validation_runs: list[Path] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a tuned capacity profile from inventory and optional validation runs."""
+
+    validation_runs = validation_runs or []
+    tuned_config = SoakConfig.model_validate(
+        build_calibrated_config(
+            config=config,
+            cpu_vcpus=int(cloud_calibration["generated_capacity"]["compute"]["vcpus"]),
+            memory_ram_gib=float(cloud_calibration["generated_capacity"]["compute"]["ram_gib"]),
+            cpu_resource_class=str(
+                cloud_calibration["generated_capacity"]["compute"]["cpu_resource_class"]
+            ),
+        )
+    )
+    plan_100 = create_plan(
+        tuned_config,
+        target_percent=100,
+        flavor_specs=flavor_specs,
+        run_id="calibration-profile",
+    )
+    observed = _observed_from_runs(validation_runs)
+    inventory_capacity = copy.deepcopy(cloud_calibration["generated_capacity"])
+    exercisable = _initial_exercisable_capacity(tuned_config, plan_100)
+    plane_results = {
+        plane: _plane_result(
+            plane=plane,
+            requested=_target_for_plane(exercisable, plane, target_percent),
+            observed=observed.get(plane),
+            pass_ratio=config.calibration.pass_ratio,
+        )
+        for plane in ("compute", "network", "storage", "api")
+    }
+    derated = _apply_derating(
+        exercisable=copy.deepcopy(exercisable),
+        plane_results=plane_results,
+        target_percent=target_percent,
+        derate_policy=config.calibration.derate_policy,
+    )
+    generated_config = _config_with_exercisable_capacity(tuned_config, derated)
+    profile = {
+        "schema_version": 1,
+        "target_percent": target_percent,
+        "pass_ratio": config.calibration.pass_ratio,
+        "derate_policy": config.calibration.derate_policy,
+        "network_direction": config.calibration.network_direction,
+        "inventory_capacity": inventory_capacity,
+        "exercisable_capacity": derated,
+        "initial_exercisable_capacity": exercisable,
+        "plane_results": plane_results,
+        "validation_runs": [str(path) for path in validation_runs],
+        "generated_config_file": "tuned-config.yaml",
+        "notes": [
+            "Inventory capacity is OpenStack/Placement/operator-declared.",
+            "Exercisable capacity is the envelope the configured flavors and workload model can drive.",
+            "Prometheus/Grafana data is validation evidence only and is not used for automatic tuning.",
+        ],
+    }
+    return profile, generated_config
+
+
+def write_calibration_profile(run_dir: Path, profile: dict[str, Any], tuned_config: dict[str, Any]) -> None:
+    (run_dir / "calibration-profile.json").write_text(
+        _json_dumps(profile),
+        encoding="utf-8",
+    )
+    (run_dir / "calibration-profile.md").write_text(
+        render_calibration_profile_markdown(profile),
+        encoding="utf-8",
+    )
+    (run_dir / "tuned-config.yaml").write_text(
+        yaml.safe_dump(tuned_config, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def render_calibration_profile_markdown(profile: dict[str, Any]) -> str:
+    lines = [
+        "# soak-tester calibration profile",
+        "",
+        f"Target: `{profile['target_percent']}%`",
+        f"Pass ratio: `{profile['pass_ratio']}`",
+        f"Network direction: `{profile['network_direction']}`",
+        "",
+        "## Plane Status",
+        "",
+    ]
+    for plane, result in profile["plane_results"].items():
+        lines.append(
+            f"- {plane}: {result['status']} "
+            f"(requested={result['requested']}, observed={result.get('observed')})"
+        )
+    lines.extend(
+        [
+            "",
+            "## Exercisable Capacity",
+            "",
+            "```yaml",
+            yaml.safe_dump(profile["exercisable_capacity"], sort_keys=False).strip(),
+            "```",
+            "",
+            "This profile distinguishes OpenStack inventory from the exercisable workload envelope. "
+            "A target is achieved only when every plane reaches the requested fraction within the pass band.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _initial_exercisable_capacity(config: SoakConfig, plan_100: Any) -> dict[str, Any]:
+    return {
+        "compute": {
+            "vcpus": plan_100.compute.planned_vcpus,
+            "ram_gib": plan_100.compute.planned_ram_gib,
+            "cpu_resource_class": config.capacity.compute.cpu_resource_class,
+            "worker_count": plan_100.compute.worker_count,
+            "worker_groups": plan_100.compute.worker_groups,
+        },
+        "network": {
+            "gbps": config.capacity.network.gbps,
+            "scope": config.capacity.network.scope,
+            "per_host_gbps": config.capacity.network.per_host_gbps,
+            "direction": config.calibration.network_direction,
+            "sender_worker_target_gbps": config.workloads.network.sender_worker_target_gbps,
+            "receiver_worker_target_gbps": config.workloads.network.receiver_worker_target_gbps,
+            "target_gbps_per_flow": config.workloads.network.target_gbps_per_flow,
+        },
+        "storage": {
+            "read_gbps": config.capacity.storage.read_gbps,
+            "write_gbps": config.capacity.storage.write_gbps,
+            "iops": config.capacity.storage.iops,
+            "profile": config.workloads.storage.profile,
+            "worker_count": config.workloads.storage.worker_count,
+        },
+        "api": {
+            "ops_per_second": config.capacity.api.ops_per_second,
+            "run_from": "controller",
+        },
+    }
+
+
+def _observed_from_runs(validation_runs: list[Path]) -> dict[str, dict[str, float]]:
+    observed: dict[str, dict[str, float]] = {}
+    for run_dir in validation_runs:
+        report = read_json(run_dir / "final-report.json", default={})
+        achieved = report.get("achieved", {})
+        if "iperf.goodput_gbps_avg" in achieved:
+            observed["network"] = {
+                "gbps": float(achieved["iperf.goodput_gbps_avg"]),
+                "errors": float(achieved.get("iperf.flow_failed_avg", 0)),
+            }
+        storage = {}
+        if "fio.read_gbps_avg" in achieved:
+            storage["read_gbps"] = float(achieved["fio.read_gbps_avg"])
+        if "fio.write_gbps_avg" in achieved:
+            storage["write_gbps"] = float(achieved["fio.write_gbps_avg"])
+        if "fio.read_iops_avg" in achieved:
+            storage["iops"] = float(achieved["fio.read_iops_avg"])
+        if storage:
+            observed["storage"] = storage
+        if "api.success_ops_per_second_avg" in achieved:
+            observed["api"] = {
+                "ops_per_second": float(achieved["api.success_ops_per_second_avg"]),
+                "errors": float(achieved.get("api.errors_avg", 0)),
+            }
+    return observed
+
+
+def _plane_result(
+    *,
+    plane: str,
+    requested: dict[str, float],
+    observed: dict[str, float] | None,
+    pass_ratio: float,
+) -> dict[str, Any]:
+    if not observed:
+        return {
+            "status": "not_validated",
+            "requested": requested,
+            "observed": None,
+            "required": {key: value * pass_ratio for key, value in requested.items()},
+        }
+    required = {key: value * pass_ratio for key, value in requested.items()}
+    ratios = {key: observed.get(key, 0) / value for key, value in required.items() if value > 0}
+    error_free = observed.get("errors", 0) == 0
+    passed = bool(ratios) and all(ratio >= 1 for ratio in ratios.values()) and error_free
+    return {
+        "status": "passed" if passed else "missed",
+        "requested": requested,
+        "required": required,
+        "observed": observed,
+        "required_ratio_observed": ratios,
+    }
+
+
+def _target_for_plane(
+    exercisable: dict[str, Any],
+    plane: str,
+    target_percent: float,
+) -> dict[str, float]:
+    factor = target_percent / 100
+    if plane == "compute":
+        return {
+            "vcpus": float(exercisable["compute"]["vcpus"]) * factor,
+            "ram_gib": float(exercisable["compute"]["ram_gib"]) * factor,
+        }
+    if plane == "network":
+        return {"gbps": float(exercisable["network"]["gbps"]) * factor}
+    if plane == "storage":
+        return {
+            "read_gbps": float(exercisable["storage"]["read_gbps"]) * factor,
+            "write_gbps": float(exercisable["storage"]["write_gbps"]) * factor,
+            "iops": float(exercisable["storage"]["iops"]) * factor,
+        }
+    return {"ops_per_second": float(exercisable["api"]["ops_per_second"]) * factor}
+
+
+def _apply_derating(
+    *,
+    exercisable: dict[str, Any],
+    plane_results: dict[str, dict[str, Any]],
+    target_percent: float,
+    derate_policy: str,
+) -> dict[str, Any]:
+    if derate_policy != "auto_once":
+        return exercisable
+    factor = target_percent / 100
+    for plane, result in plane_results.items():
+        if result["status"] != "missed" or not result.get("observed"):
+            continue
+        observed = result["observed"]
+        if plane == "network" and observed.get("gbps", 0) > 0:
+            exercisable["network"]["gbps"] = observed["gbps"] / factor
+        elif plane == "storage":
+            for key in ("read_gbps", "write_gbps", "iops"):
+                if observed.get(key, 0) > 0:
+                    exercisable["storage"][key] = observed[key] / factor
+        elif plane == "api" and observed.get("ops_per_second", 0) > 0:
+            exercisable["api"]["ops_per_second"] = observed["ops_per_second"] / factor
+    return exercisable
+
+
+def _config_with_exercisable_capacity(config: SoakConfig, exercisable: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(config.model_dump(mode="json"))
+    payload["capacity"]["compute"]["vcpus"] = int(exercisable["compute"]["vcpus"])
+    payload["capacity"]["compute"]["ram_gib"] = float(exercisable["compute"]["ram_gib"])
+    payload["capacity"]["network"]["gbps"] = float(exercisable["network"]["gbps"])
+    if exercisable["network"].get("per_host_gbps") is not None:
+        payload["capacity"]["network"]["per_host_gbps"] = float(
+            exercisable["network"]["per_host_gbps"]
+        )
+    payload["capacity"]["storage"]["read_gbps"] = float(exercisable["storage"]["read_gbps"])
+    payload["capacity"]["storage"]["write_gbps"] = float(exercisable["storage"]["write_gbps"])
+    payload["capacity"]["storage"]["iops"] = int(exercisable["storage"]["iops"])
+    payload["capacity"]["api"]["ops_per_second"] = float(exercisable["api"]["ops_per_second"])
+    payload["workloads"]["api"]["run_from"] = "controller"
+    return payload
+
+
+def _json_dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
 def discover_placement_inventory(

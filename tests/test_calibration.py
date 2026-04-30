@@ -1,7 +1,10 @@
 from pathlib import Path
 
-from soak_tester.calibration import discover_cloud_capacity
+import json
+
+from soak_tester.calibration import build_calibration_profile, discover_cloud_capacity
 from soak_tester.config import load_config
+from soak_tester.planner import FlavorSpec
 
 
 class FakePlacement:
@@ -119,3 +122,71 @@ def test_cloud_calibration_can_use_configured_hugepage_memory_envelope():
     assert memory["per_host_ram_gib"] == 2048
     assert memory["allocatable_gib"] == 6144
     assert calibration["generated_capacity"]["compute"]["ram_gib"] == 6144
+
+
+def test_profile_uses_feasible_flavor_packing_as_exercisable_compute_capacity():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.capacity.compute.per_host_ram_gib = 2048
+    config.workloads.compute.flavor_mix = ["m1.big", "m1.small"]
+    cloud = discover_cloud_capacity(FakeConnection(), config)
+    flavors = _flavors()
+
+    profile, tuned_config = build_calibration_profile(
+        config=config,
+        cloud_calibration=cloud,
+        flavor_specs=flavors,
+        target_percent=80,
+    )
+
+    assert profile["inventory_capacity"]["compute"]["vcpus"] == 1248
+    assert profile["exercisable_capacity"]["compute"]["vcpus"] <= 1248
+    assert profile["exercisable_capacity"]["compute"]["ram_gib"] <= 6144
+    assert tuned_config["capacity"]["compute"]["cpu_resource_class"] == "PCPU"
+    assert tuned_config["workloads"]["api"]["run_from"] == "controller"
+
+
+def test_profile_derates_missed_validation_planes_once(tmp_path):
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    cloud = discover_cloud_capacity(FakeConnection(), config)
+    report_dir = tmp_path / "validation"
+    report_dir.mkdir()
+    (report_dir / "final-report.json").write_text(
+        json.dumps(
+            {
+                "achieved": {
+                    "iperf.goodput_gbps_avg": 240,
+                    "fio.read_gbps_avg": 80,
+                    "fio.write_gbps_avg": 40,
+                    "fio.read_iops_avg": 250000,
+                    "api.success_ops_per_second_avg": 60,
+                    "api.errors_avg": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    profile, tuned_config = build_calibration_profile(
+        config=config,
+        cloud_calibration=cloud,
+        flavor_specs=_flavors(),
+        target_percent=80,
+        validation_runs=[report_dir],
+    )
+
+    assert profile["plane_results"]["network"]["status"] == "missed"
+    assert profile["exercisable_capacity"]["network"]["gbps"] == 300
+    assert profile["exercisable_capacity"]["api"]["ops_per_second"] == 75
+    assert tuned_config["capacity"]["network"]["gbps"] == 300
+
+
+def _flavors() -> dict[str, FlavorSpec]:
+    return {
+        "m1.soak-compute": FlavorSpec(name="m1.soak-compute", vcpus=8, ram_gib=16),
+        "m1.soak-net": FlavorSpec(name="m1.soak-net", vcpus=4, ram_gib=8),
+        "m1.soak-fio": FlavorSpec(name="m1.soak-fio", vcpus=4, ram_gib=8),
+        "m1.soak-controller": FlavorSpec(name="m1.soak-controller", vcpus=2, ram_gib=4),
+        "m1.soak-api": FlavorSpec(name="m1.soak-api", vcpus=2, ram_gib=4),
+        "m1.big": FlavorSpec(name="m1.big", vcpus=16, ram_gib=64),
+        "m1.small": FlavorSpec(name="m1.small", vcpus=4, ram_gib=8),
+    }

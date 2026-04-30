@@ -17,6 +17,8 @@ def test_load_config_accepts_example_schema():
     assert config.capacity.compute.cpu_resource_class == "auto"
     assert config.capacity.compute.ram_resource_class == "MEMORY_MB"
     assert config.capacity.compute.per_host_ram_gib is None
+    assert config.calibration.pass_ratio == 0.95
+    assert config.calibration.network_direction == "egress"
     assert config.resources.network_cidr == "10.250.0.0/24"
     assert config.workloads.storage.volume_type == "ceph-ssd"
     assert config.observability.prometheus.query_packs == ["node-exporter-network"]

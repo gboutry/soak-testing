@@ -31,6 +31,7 @@ soak-tester inspect --os-cloud admin --config config.yaml
 soak-tester plan --os-cloud admin --config config.yaml --target 80
 soak-tester run --os-cloud admin --config config.yaml --target 80 --duration 8h
 soak-tester calibrate cloud --os-cloud admin --config config.yaml
+soak-tester calibrate profile --os-cloud admin --config config.yaml --target 80
 soak-tester calibrate network --os-cloud admin --config config.yaml --duration 10m
 soak-tester status --run runs/soak-20260429-143000
 soak-tester cleanup --run runs/soak-20260429-143000 --dry-run
@@ -95,6 +96,13 @@ Calibration will then write total compute RAM as
 Network bandwidth, storage performance, and API throughput are not reliably
 advertised by vanilla OpenStack APIs. The calibration report records configured
 assumptions for those planes until workload probes replace them.
+
+`soak-tester calibrate profile` turns inventory and optional validation-run
+evidence into a tuned workload profile. It writes `calibration-profile.json`,
+`calibration-profile.md`, and `tuned-config.yaml`. The profile distinguishes
+OpenStack inventory from the exercisable workload envelope, applies a default
+`0.95` pass ratio, models network capacity as per-host egress, and can derate
+planes once when a validation run misses the requested target.
 
 ## Artifact Layout
 

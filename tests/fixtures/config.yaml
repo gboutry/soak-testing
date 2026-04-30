@@ -109,6 +109,13 @@ observability:
     query_packs:
       - node-exporter-network
 
+calibration:
+  pass_ratio: 0.95
+  ramp_duration: 3m
+  validation_duration: 10m
+  derate_policy: auto_once
+  network_direction: egress
+
 run:
   warmup: 5m
   cooldown: 2m

@@ -10,7 +10,12 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from soak_tester.calibration import build_calibrated_config, discover_cloud_capacity
+from soak_tester.calibration import (
+    build_calibrated_config,
+    build_calibration_profile,
+    discover_cloud_capacity,
+    write_calibration_profile,
+)
 from soak_tester.cleanup import cleanup_run
 from soak_tester.config import dump_config, load_config
 from soak_tester.events import EventWriter, MetricWriter
@@ -412,6 +417,39 @@ def calibrate_cloud(
         f"{compute['allocatable']} {compute['resource_class']} guest cores, "
         f"{memory['allocatable_gib']} GiB RAM"
     )
+
+
+@calibrate_app.command("profile")
+def calibrate_profile(
+    os_cloud: Annotated[str, typer.Option("--os-cloud")],
+    config: Annotated[Path, typer.Option("--config", exists=True)],
+    target: Annotated[float, typer.Option("--target", min=1, max=100)] = 80,
+    validation_run: Annotated[
+        list[Path] | None,
+        typer.Option("--validation-run", exists=True, help="Existing run directory to use as validation evidence."),
+    ] = None,
+) -> None:
+    """Build a tuned calibration profile for per-plane target percentages."""
+    run_dir = _create_run_dir()
+    cfg = load_config(config)
+    conn = admin_connection(os_cloud)
+    _prepare_openstack_context(conn, cfg)
+    cloud_calibration = discover_cloud_capacity(conn, cfg)
+    flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
+    profile, tuned_config = build_calibration_profile(
+        config=cfg,
+        cloud_calibration=cloud_calibration,
+        flavor_specs=flavor_specs,
+        target_percent=target,
+        validation_runs=validation_run or [],
+    )
+    (run_dir / "calibration.json").write_text(
+        json.dumps(cloud_calibration, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    write_calibration_profile(run_dir, profile, tuned_config)
+    console.print(f"Calibration profile written to {run_dir / 'calibration-profile.json'}")
+    console.print(f"Tuned config written to {run_dir / 'tuned-config.yaml'}")
 
 
 def _create_run_dir() -> Path:

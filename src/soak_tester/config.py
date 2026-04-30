@@ -82,7 +82,7 @@ class CapacityConfig(BaseModel):
 
 class ApiWorkloadConfig(BaseModel):
     enabled: bool = True
-    run_from: Literal["local"] = "local"
+    run_from: Literal["local", "controller"] = "local"
     operation_mix: dict[str, int] = Field(default_factory=dict)
     create_delete_volume_size_gib: int = 1
 
@@ -217,6 +217,20 @@ class ObservabilityConfig(BaseModel):
     prometheus: PrometheusConfig = Field(default_factory=PrometheusConfig)
 
 
+class CalibrationConfig(BaseModel):
+    pass_ratio: float = Field(default=0.95, gt=0, le=1)
+    ramp_duration: str = "3m"
+    validation_duration: str = "10m"
+    derate_policy: Literal["auto_once", "fail"] = "auto_once"
+    network_direction: Literal["egress"] = "egress"
+
+    @field_validator("ramp_duration", "validation_duration")
+    @classmethod
+    def validate_duration(cls, value: str) -> str:
+        parse_duration(value)
+        return value
+
+
 class RunConfig(BaseModel):
     warmup: str = "5m"
     cooldown: str = "2m"
@@ -242,6 +256,7 @@ class SoakConfig(BaseModel):
     workloads: WorkloadsConfig = Field(default_factory=WorkloadsConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     run: RunConfig = Field(default_factory=RunConfig)
 
 
