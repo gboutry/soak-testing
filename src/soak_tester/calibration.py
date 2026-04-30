@@ -215,6 +215,7 @@ def _initial_exercisable_capacity(config: SoakConfig, plan_100: Any) -> dict[str
             "gbps": config.capacity.network.gbps,
             "scope": config.capacity.network.scope,
             "per_host_gbps": config.capacity.network.per_host_gbps,
+            "host_count": plan_100.network.host_count,
             "direction": config.calibration.network_direction,
             "sender_worker_target_gbps": config.workloads.network.sender_worker_target_gbps,
             "receiver_worker_target_gbps": config.workloads.network.receiver_worker_target_gbps,
@@ -326,6 +327,10 @@ def _apply_derating(
         observed = result["observed"]
         if plane == "network" and observed.get("gbps", 0) > 0:
             exercisable["network"]["gbps"] = observed["gbps"] / factor
+            if exercisable["network"].get("scope") == "per_host" and exercisable["network"].get("host_count"):
+                exercisable["network"]["per_host_gbps"] = (
+                    exercisable["network"]["gbps"] / exercisable["network"]["host_count"]
+                )
         elif plane == "storage":
             for key in ("read_gbps", "write_gbps", "iops"):
                 if observed.get(key, 0) > 0:

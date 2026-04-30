@@ -147,6 +147,10 @@ def test_profile_uses_feasible_flavor_packing_as_exercisable_compute_capacity():
 
 def test_profile_derates_missed_validation_planes_once(tmp_path):
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.capacity.network.scope = "per_host"
+    config.capacity.network.per_host_gbps = 200
+    config.workloads.network.topology = "full_mesh"
+    config.workloads.network.host_count = 3
     cloud = discover_cloud_capacity(FakeConnection(), config)
     report_dir = tmp_path / "validation"
     report_dir.mkdir()
@@ -176,8 +180,10 @@ def test_profile_derates_missed_validation_planes_once(tmp_path):
 
     assert profile["plane_results"]["network"]["status"] == "missed"
     assert profile["exercisable_capacity"]["network"]["gbps"] == 300
+    assert profile["exercisable_capacity"]["network"]["per_host_gbps"] == 100
     assert profile["exercisable_capacity"]["api"]["ops_per_second"] == 75
     assert tuned_config["capacity"]["network"]["gbps"] == 300
+    assert tuned_config["capacity"]["network"]["per_host_gbps"] == 100
 
 
 def _flavors() -> dict[str, FlavorSpec]:
