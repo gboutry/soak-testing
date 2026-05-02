@@ -21,6 +21,23 @@ def test_compute_worker_cloud_init_posts_guest_system_metrics():
     assert "sample_system_metrics()" in script
 
 
+def test_compute_worker_cloud_init_stresses_root_disk_with_stress_ng():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+
+    script = worker_cloud_init(
+        config=config,
+        role="compute",
+        worker_id="compute-000",
+        controller_url="http://controller:8080",
+        duration_seconds=60,
+    )
+
+    assert "'--hdd', '1'" in script
+    assert "'--hdd-bytes', '10G'" in script
+    assert "'--hdd-opts', 'direct,sync'" in script
+    assert "'--iostat', '1'" in script
+
+
 def test_worker_cloud_init_separates_agent_and_workload_duration():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
 

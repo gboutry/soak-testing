@@ -143,6 +143,9 @@ def start_workload():
             return subprocess.Popen([
                 'stress-ng', '--cpu', '0', '--cpu-load', str(CPU_LOAD),
                 '--vm', '1', '--vm-bytes', str(MEMORY_LOAD) + '%',
+                '--hdd', '1', '--hdd-bytes', '10G',
+                '--hdd-opts', 'direct,sync',
+                '--iostat', '1',
                 '--timeout', str(WORKLOAD_DURATION),
             ])
         return subprocess.Popen(['sh', '-c', 'yes >/dev/null'])
