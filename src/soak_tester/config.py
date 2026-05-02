@@ -90,6 +90,7 @@ class ApiWorkloadConfig(BaseModel):
     run_from: Literal["local", "controller"] = "local"
     operation_mix: dict[str, int] = Field(default_factory=dict)
     create_delete_volume_size_gib: int = 1
+    rally_mode: Literal["single_task", "saturation"] = "saturation"
     rally_concurrency: int = Field(default=1, ge=1)
     rally_times: int | None = Field(default=None, ge=1)
     rally_include_create_delete: bool = False
@@ -130,10 +131,16 @@ class NetworkWorkloadConfig(BaseModel):
     tool: Literal["iperf3"] = "iperf3"
     topology: Literal["paired", "full_mesh"] = "paired"
     flow_duration: str = "60s"
+    omit_seconds: int = Field(default=0, ge=0)
     parallel_streams_per_flow: int = 4
     target_gbps_per_flow: float = 10
     sender_worker_target_gbps: float = 10
     receiver_worker_target_gbps: float = 10
+    tcp_window: str | None = None
+    zerocopy: bool = False
+    reverse: bool = False
+    bidirectional: bool = False
+    extra_client_args: list[str] = Field(default_factory=list)
     hosts: list[str] | None = None
     host_count: int | None = None
     receiver_port_base: int = 5201
@@ -145,6 +152,12 @@ class NetworkWorkloadConfig(BaseModel):
     def validate_flow_duration(cls, value: str) -> str:
         parse_duration(value)
         return value
+
+    @model_validator(mode="after")
+    def validate_direction(self) -> NetworkWorkloadConfig:
+        if self.reverse and self.bidirectional:
+            raise ValueError("workloads.network.reverse and bidirectional are mutually exclusive")
+        return self
 
 
 class StorageWorkloadConfig(BaseModel):

@@ -185,11 +185,7 @@ def run(
     save_state(run_dir, state)
     events.write(level="info", plane="control", event="run_started")
     duration_s = duration_seconds(duration)
-    if (
-        cfg.workloads.api.enabled
-        and cfg.workloads.api.engine == "rally"
-        and soak_plan.api.target_ops_per_second > 0
-    ):
+    if cfg.workloads.api.enabled and cfg.workloads.api.engine == "rally":
         _run_rally_api_with_periodic_collection(
             run_dir=run_dir,
             state=state,
@@ -286,6 +282,7 @@ def _run_rally_api_with_periodic_collection(
                 volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
                 include_create_delete=cfg.workloads.api.rally_include_create_delete,
                 error_rate_max=cfg.workloads.api.rally_error_rate_max,
+                mode=cfg.workloads.api.rally_mode,
                 metric_writer=metrics,
                 event_writer=events,
             )

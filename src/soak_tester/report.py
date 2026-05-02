@@ -44,7 +44,98 @@ def generate_final_report(run_dir: Path) -> dict[str, Any]:
     }
     atomic_write_json(run_dir / "final-report.json", report)
     (run_dir / "final-report.md").write_text(render_markdown_report(report), encoding="utf-8")
+    domain_summary = build_domain_summary(run_dir, report, metrics)
+    atomic_write_json(run_dir / "summary.json", domain_summary)
+    (run_dir / "summary.md").write_text(
+        render_domain_summary_markdown(domain_summary),
+        encoding="utf-8",
+    )
     return report
+
+
+def build_domain_summary(
+    run_dir: Path,
+    report: dict[str, Any],
+    metrics: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    metrics = metrics if metrics is not None else _read_jsonl(run_dir / "metrics.jsonl")
+    requested = report.get("requested") or {}
+    achieved = report.get("achieved") or {}
+    rally_summary = read_json(run_dir / "api-rally" / "summary.json", default=None)
+    return {
+        "run_id": report.get("run_id"),
+        "status": report.get("status"),
+        "steady_state_window": report.get("steady_state_window"),
+        "compute": _compute_summary(requested, achieved, metrics),
+        "network": _network_summary(requested, achieved, metrics),
+        "storage": _storage_summary(requested, achieved, metrics),
+        "api": _api_summary(requested, achieved, rally_summary),
+        "artifacts": {
+            "final_report_json": "final-report.json",
+            "final_report_markdown": "final-report.md",
+            "metrics": "metrics.jsonl",
+            "events": "events.jsonl",
+            "rally_summary": "api-rally/summary.json" if rally_summary else None,
+            "rally_results": "api-rally/results.json" if rally_summary else None,
+        },
+    }
+
+
+def render_domain_summary_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        f"# soak-tester summary: {summary.get('run_id')}",
+        "",
+        f"Status: `{summary.get('status')}`",
+        "",
+        "## Compute",
+        "",
+        *_render_key_values(summary["compute"]),
+        "",
+        "## Network",
+        "",
+        *_render_key_values(summary["network"]),
+        "",
+        "## Storage",
+        "",
+        *_render_key_values(summary["storage"]),
+        "",
+        "## API",
+        "",
+        *_render_key_values({k: v for k, v in summary["api"].items() if k != "scenarios"}),
+    ]
+    scenarios = summary["api"].get("scenarios") or {}
+    if scenarios:
+        lines.extend(["", "### API scenarios", ""])
+        lines.extend(
+            [
+                "| scenario | attempts | successes | errors | p50 ms | p95 ms | p99 ms |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for name, item in sorted(scenarios.items()):
+            lines.append(
+                "| {name} | {attempts} | {successes} | {errors} | {p50} | {p95} | {p99} |".format(
+                    name=name,
+                    attempts=_fmt(item.get("attempts", 0)),
+                    successes=_fmt(item.get("successes", 0)),
+                    errors=_fmt(item.get("errors", 0)),
+                    p50=_fmt(item.get("latency_p50_ms", 0)),
+                    p95=_fmt(item.get("latency_p95_ms", 0)),
+                    p99=_fmt(item.get("latency_p99_ms", 0)),
+                )
+            )
+    lines.extend(
+        [
+            "",
+            "## Artifacts",
+            "",
+            *_render_key_values({k: v for k, v in summary["artifacts"].items() if v}),
+            "",
+            "Values are workload-observed unless explicitly labelled otherwise.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
@@ -117,6 +208,121 @@ def _summarize_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
         if name.endswith(".goodput_bps"):
             result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
     return result
+
+
+def _compute_summary(
+    requested: dict[str, Any],
+    achieved: dict[str, float],
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    workers = {
+        str(item.get("worker_id"))
+        for item in metrics
+        if str(item.get("worker_id", "")).startswith("compute-")
+    }
+    return {
+        "requested_vcpus": requested.get("compute_vcpus", 0),
+        "observed_workers": len(workers),
+        "guest_cpu_percent_avg": achieved.get("guest.cpu_percent_avg", 0),
+        "guest_memory_used_percent_avg": achieved.get("guest.memory_used_percent_avg", 0),
+    }
+
+
+def _network_summary(
+    requested: dict[str, Any],
+    achieved: dict[str, float],
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    goodput = _metric_values(metrics, "iperf.goodput_bps")
+    retransmits = _metric_values(metrics, "iperf.retransmits")
+    flows = {
+        (
+            str(item.get("worker_id", "")),
+            str((item.get("tags") or {}).get("flow_id") or (item.get("tags") or {}).get("receiver") or ""),
+        )
+        for item in metrics
+        if item.get("metric") == "iperf.goodput_bps"
+    }
+    return {
+        "requested_gbps": requested.get("network_gbps", 0),
+        "iperf_goodput_gbps_avg": achieved.get("iperf.goodput_gbps_avg", 0),
+        "iperf_flow_samples": len(goodput),
+        "iperf_unique_flows": len(flows),
+        "iperf_retransmits_total": sum(retransmits),
+        "iperf_retransmits_max": max(retransmits, default=0),
+    }
+
+
+def _storage_summary(
+    requested: dict[str, Any],
+    achieved: dict[str, float],
+    metrics: list[dict[str, Any]],
+) -> dict[str, Any]:
+    workers = {
+        str(item.get("worker_id"))
+        for item in metrics
+        if str(item.get("worker_id", "")).startswith("storage-")
+    }
+    return {
+        "requested_read_gbps": requested.get("storage_read_gbps", 0),
+        "requested_write_gbps": requested.get("storage_write_gbps", 0),
+        "observed_workers": len(workers),
+        "fio_read_gbps_avg": achieved.get("fio.read_gbps_avg", 0),
+        "fio_write_gbps_avg": achieved.get("fio.write_gbps_avg", 0),
+        "fio_read_iops_avg": achieved.get("fio.read_iops_avg", 0),
+        "fio_write_iops_avg": achieved.get("fio.write_iops_avg", 0),
+        "fio_read_p95_latency_ns_avg": achieved.get("fio.read_p95_latency_ns_avg", 0),
+        "fio_write_p95_latency_ns_avg": achieved.get("fio.write_p95_latency_ns_avg", 0),
+    }
+
+
+def _api_summary(
+    requested: dict[str, Any],
+    achieved: dict[str, float],
+    rally_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if rally_summary:
+        return {
+            "mode": "rally",
+            "requested_ops_per_second": requested.get("api_ops_per_second", 0),
+            "total_attempts": rally_summary.get("total_attempts", 0),
+            "successes": rally_summary.get("successes", 0),
+            "errors": rally_summary.get("errors", 0),
+            "error_rate": rally_summary.get("error_rate", 0),
+            "total_ops_per_second": rally_summary.get("total_ops_per_second", 0),
+            "success_ops_per_second": rally_summary.get("success_ops_per_second", 0),
+            "latency_p50_ms": rally_summary.get("latency_p50_ms", 0),
+            "latency_p95_ms": rally_summary.get("latency_p95_ms", 0),
+            "latency_p99_ms": rally_summary.get("latency_p99_ms", 0),
+            "scenarios": rally_summary.get("scenarios", {}),
+        }
+    return {
+        "mode": "native",
+        "requested_ops_per_second": requested.get("api_ops_per_second", 0),
+        "total_ops_per_second": achieved.get("api.ops_per_second_avg", 0),
+        "success_ops_per_second": achieved.get("api.success_ops_per_second_avg", 0),
+        "errors": achieved.get("api.errors_avg", 0),
+        "error_rate": achieved.get("api.error_rate_avg", 0),
+        "latency_p95_ms": achieved.get("api.latency_p95_ms_avg", 0),
+        "latency_p99_ms": achieved.get("api.latency_p99_ms_avg", 0),
+        "scenarios": {},
+    }
+
+
+def _metric_values(metrics: list[dict[str, Any]], name: str) -> list[float]:
+    return [float(item["value"]) for item in metrics if item.get("metric") == name]
+
+
+def _render_key_values(values: dict[str, Any]) -> list[str]:
+    return [f"- {key.replace('_', ' ')}: {_fmt(value)}" for key, value in values.items()]
+
+
+def _fmt(value: Any) -> str:
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return str(value)
 
 
 def _aggregate_series_averages(name: str, series_avgs: list[float]) -> float:

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,20 +59,20 @@ def render_rally_task(
     volume_size_gib: int = 1,
     include_create_delete: bool = True,
     error_rate_max: float = 0.0,
+    scenario_names: list[str] | None = None,
 ) -> str:
-    scenario_names = [
+    scenario_names = scenario_names or [
         "Authenticate.validate_nova",
         "Authenticate.validate_neutron",
         "Authenticate.validate_cinder",
         "NovaServers.list_servers",
         "CinderVolumes.list_volumes",
     ]
-    per_scenario_duration = max(1, duration_seconds // max(len(scenario_names), 1))
     runner: dict[str, Any]
     if duration_seconds > 0:
         runner = {
             "type": "constant_for_duration",
-            "duration": per_scenario_duration,
+            "duration": duration_seconds,
             "concurrency": concurrency,
         }
     elif times:
@@ -79,16 +81,16 @@ def render_rally_task(
         runner = {"type": "constant", "times": concurrency, "concurrency": concurrency}
     common = {
         "runner": runner,
-        "context": {"users": {"tenants": 1, "users_per_tenant": 1}},
         "sla": {"failure_rate": {"max": error_rate_max}},
     }
-    scenarios: dict[str, list[dict[str, Any]]] = {
+    all_scenarios: dict[str, list[dict[str, Any]]] = {
         "Authenticate.validate_nova": [{**common, "args": {"repetitions": 1}}],
         "Authenticate.validate_neutron": [{**common, "args": {"repetitions": 1}}],
         "Authenticate.validate_cinder": [{**common, "args": {"repetitions": 1}}],
         "NovaServers.list_servers": [{**common, "args": {"detailed": True}}],
         "CinderVolumes.list_volumes": [{**common, "args": {"detailed": True}}],
     }
+    scenarios = {name: all_scenarios[name] for name in scenario_names}
     return yaml.safe_dump(scenarios, sort_keys=False)
 
 
@@ -165,6 +167,7 @@ def run_rally_api_workload(
     volume_size_gib: int,
     include_create_delete: bool,
     error_rate_max: float,
+    mode: str = "saturation",
     metric_writer: MetricWriter,
     event_writer: EventWriter,
     command_runner: Any = subprocess.run,
@@ -176,70 +179,85 @@ def run_rally_api_workload(
     results_path = rally_dir / "results.json"
     summary_path = rally_dir / "summary.json"
     log_path = rally_dir / "rally.log"
-    task_path.write_text(
-        render_rally_task(
-            duration_seconds=duration_seconds,
-            concurrency=concurrency,
-            times=times,
-            volume_size_gib=volume_size_gib,
-            include_create_delete=include_create_delete,
-            error_rate_max=error_rate_max,
-        ),
-        encoding="utf-8",
+    task_payload = render_rally_task(
+        duration_seconds=duration_seconds,
+        concurrency=concurrency,
+        times=times,
+        volume_size_gib=volume_size_gib,
+        include_create_delete=include_create_delete,
+        error_rate_max=error_rate_max,
     )
+    task_path.write_text(task_payload, encoding="utf-8")
     deployment_name = f"soak-tester-{run_dir.name}"
     deployment_path.write_text(_deployment_json(auth, redact=True), encoding="utf-8")
     deployment_path.chmod(0o600)
     event_writer.write(level="info", plane="api", event="rally_started")
     env = _rally_env(auth)
-    with log_path.open("a", encoding="utf-8") as log:
-        _run_rally_command(
-            command_runner,
-            [
-                "rally",
-                "deployment",
-                "create",
-                "--fromenv",
-                "--name",
-                deployment_name,
-            ],
-            env=env,
-            log=log,
-        )
     start = time.monotonic()
     task_returncode = 0
     try:
-        with log_path.open("a", encoding="utf-8") as log:
-            completed = command_runner(
-                ["rally", "task", "start", "--deployment", deployment_name, "--task", str(task_path)],
-                check=False,
+        if mode == "saturation":
+            result_paths, task_returncode = _run_saturation_tasks(
+                command_runner=command_runner,
+                rally_dir=rally_dir,
+                deployment_name=deployment_name,
                 env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
+                duration_seconds=duration_seconds,
+                concurrency=concurrency,
+                times=times,
+                volume_size_gib=volume_size_gib,
+                include_create_delete=include_create_delete,
+                error_rate_max=error_rate_max,
             )
-            task_returncode = int(getattr(completed, "returncode", 0) or 0)
-            task_uuid = _latest_rally_task_uuid(command_runner, deployment_name, env=env)
-            command_runner(
-                ["rally", "task", "report", "--uuid", task_uuid, "--json", "--out", str(results_path)],
-                check=False,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
+            _combine_rally_reports(result_paths, results_path)
+        else:
+            with log_path.open("a", encoding="utf-8") as log:
+                _run_rally_command(
+                    command_runner,
+                    [
+                        "rally",
+                        "deployment",
+                        "create",
+                        "--fromenv",
+                        "--name",
+                        deployment_name,
+                    ],
+                    env=env,
+                    log=log,
+                )
+                completed = command_runner(
+                    ["rally", "task", "start", "--deployment", deployment_name, "--task", str(task_path)],
+                    check=False,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
+                task_returncode = int(getattr(completed, "returncode", 0) or 0)
+                task_uuid = _latest_rally_task_uuid(command_runner, deployment_name, env=env)
+                command_runner(
+                    ["rally", "task", "report", "--uuid", task_uuid, "--json", "--out", str(results_path)],
+                    check=False,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
     finally:
-        with log_path.open("a", encoding="utf-8") as log:
-            command_runner(
-                ["rally", "deployment", "destroy", "--deployment", deployment_name],
-                check=False,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
+        if mode != "saturation":
+            with log_path.open("a", encoding="utf-8") as log:
+                command_runner(
+                    ["rally", "deployment", "destroy", "--deployment", deployment_name],
+                    check=False,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                )
     elapsed = time.monotonic() - start
     if not results_path.exists():
         raise RuntimeError(f"Rally task failed with return code {task_returncode}; no results were exported")
     result_payload = results_path.read_text(encoding="utf-8")
     summary = parse_rally_results(result_payload, elapsed_seconds=elapsed)
+    if mode == "saturation" and summary.total_attempts == 0:
+        raise RuntimeError("Rally saturation mode produced no API iterations")
     summary_path.write_text(json.dumps(_summary_to_dict(summary), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     write_rally_metrics(summary, metric_writer)
     event_writer.write(
@@ -249,6 +267,190 @@ def run_rally_api_workload(
         details=_summary_to_dict(summary),
     )
     return summary
+
+
+def _run_saturation_tasks(
+    *,
+    command_runner: Any,
+    rally_dir: Path,
+    deployment_name: str,
+    env: dict[str, str],
+    duration_seconds: int,
+    concurrency: int,
+    times: int | None,
+    volume_size_gib: int,
+    include_create_delete: bool,
+    error_rate_max: float,
+) -> tuple[list[Path], int]:
+    scenarios = [
+        "Authenticate.validate_nova",
+        "Authenticate.validate_neutron",
+        "Authenticate.validate_cinder",
+        "NovaServers.list_servers",
+        "CinderVolumes.list_volumes",
+    ]
+    result_paths: list[Path] = []
+    returncodes: list[int] = []
+    with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
+        futures = [
+            executor.submit(
+                _run_saturation_scenario,
+                command_runner=command_runner,
+                rally_dir=rally_dir,
+                deployment_name=deployment_name,
+                env=env,
+                scenario=scenario,
+                duration_seconds=duration_seconds,
+                concurrency=concurrency,
+                times=times,
+                volume_size_gib=volume_size_gib,
+                include_create_delete=include_create_delete,
+                error_rate_max=error_rate_max,
+            )
+            for scenario in scenarios
+        ]
+        for future in as_completed(futures):
+            result_path, returncode = future.result()
+            result_paths.append(result_path)
+            returncodes.append(returncode)
+    return sorted(result_paths), max(returncodes, default=0)
+
+
+def _run_saturation_scenario(
+    *,
+    command_runner: Any,
+    rally_dir: Path,
+    deployment_name: str,
+    env: dict[str, str],
+    scenario: str,
+    duration_seconds: int,
+    concurrency: int,
+    times: int | None,
+    volume_size_gib: int,
+    include_create_delete: bool,
+    error_rate_max: float,
+) -> tuple[Path, int]:
+    slug = _slug(scenario)
+    task_path = rally_dir / f"task-{slug}.yaml"
+    log_path = rally_dir / f"rally-{slug}.log"
+    results_path = rally_dir / f"results-{slug}.json"
+    db_path = rally_dir / f"rally-{slug}.sqlite"
+    config_path = rally_dir / f"rally-{slug}.conf"
+    deployment_name = f"{deployment_name}-{slug}"
+    config_path.write_text(
+        f"[database]\nconnection = sqlite:///{db_path}\n",
+        encoding="utf-8",
+    )
+    task_path.write_text(
+        render_rally_task(
+            duration_seconds=duration_seconds,
+            concurrency=concurrency,
+            times=times,
+            volume_size_gib=volume_size_gib,
+            include_create_delete=include_create_delete,
+            error_rate_max=error_rate_max,
+            scenario_names=[scenario],
+        ),
+        encoding="utf-8",
+    )
+    with log_path.open("a", encoding="utf-8") as log:
+        _run_rally_command(
+            command_runner,
+            ["rally", "--config-file", str(config_path), "db", "create"],
+            env=env,
+            log=log,
+        )
+        _run_rally_command(
+            command_runner,
+            [
+                "rally",
+                "--config-file",
+                str(config_path),
+                "deployment",
+                "create",
+                "--fromenv",
+                "--name",
+                deployment_name,
+            ],
+            env=env,
+            log=log,
+        )
+        completed = command_runner(
+            [
+                "rally",
+                "--config-file",
+                str(config_path),
+                "task",
+                "start",
+                "--deployment",
+                deployment_name,
+                "--task",
+                str(task_path),
+            ],
+            check=False,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        returncode = int(getattr(completed, "returncode", 0) or 0)
+        task_uuid = _task_uuid_from_log(log_path)
+        command_runner(
+            [
+                "rally",
+                "--config-file",
+                str(config_path),
+                "task",
+                "report",
+                "--uuid",
+                task_uuid,
+                "--json",
+                "--out",
+                str(results_path),
+            ],
+            check=False,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        command_runner(
+            [
+                "rally",
+                "--config-file",
+                str(config_path),
+                "deployment",
+                "destroy",
+                "--deployment",
+                deployment_name,
+            ],
+            check=False,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    return results_path, returncode
+
+
+def _combine_rally_reports(result_paths: list[Path], output_path: Path) -> None:
+    combined: dict[str, Any] = {"tasks": []}
+    for path in result_paths:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        combined["tasks"].extend(payload.get("tasks") or [])
+    output_path.write_text(json.dumps(combined, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _task_uuid_from_log(path: Path) -> str:
+    text = path.read_text(encoding="utf-8")
+    matches = re.findall(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        text,
+    )
+    if not matches:
+        raise RuntimeError(f"Rally did not report a task UUID in {path}")
+    return matches[-1]
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
 def _parse_rally_report(data: dict[str, Any], *, elapsed_seconds: float) -> RallyApiSummary:

@@ -121,7 +121,7 @@ def provision_openstack_run(
     user = identity["user"]
     password = identity["password"]
     project_id = project.id
-    if _plan_uses_real_host_placement(plan):
+    if _plan_uses_real_host_placement(plan) or config.workloads.api.engine == "rally":
         admin_role = get_role(admin_conn, config.openstack.admin_role)
         admin_conn.identity.assign_project_role_to_user(
             project=project.id,
@@ -328,7 +328,10 @@ def provision_openstack_run(
         controller, status="ACTIVE", failures=["ERROR"], wait=900
     )
     controller_private_ip = server_private_ip(controller)
-    controller_url = f"http://{controller_private_ip}:{config.management.controller_status_port}"
+    worker_controller_url = (
+        f"http://{controller_private_ip}:{config.management.controller_status_port}"
+    )
+    controller_url = worker_controller_url
 
     if config.resources.floating_ips.controller:
         fip = project_conn.network.create_ip(
@@ -375,7 +378,7 @@ def provision_openstack_run(
                     "network",
                     "network-receiver",
                     index,
-                    controller_url,
+                    worker_controller_url,
                     worker_duration_s,
                     worker_duration_s,
                     receiver_ports=[
@@ -398,6 +401,7 @@ def provision_openstack_run(
             receiver_ips.append(ip)
             receiver_ip_by_worker_id[worker_id] = ip
 
+    planned_flows = bool(plan.network.flow_assignments)
     _run_boot_tasks(
         [
             (
@@ -417,10 +421,10 @@ def provision_openstack_run(
                     "network",
                     "network-sender",
                     index,
-                    controller_url,
+                    worker_controller_url,
                     worker_duration_s,
                     worker_duration_s,
-                    peers=receiver_ips,
+                    peers=_network_sender_legacy_peers(receiver_ips, planned_flows),
                     flow_assignments=[
                         {
                             **flow.model_dump(mode="json"),
@@ -468,7 +472,7 @@ def provision_openstack_run(
                         "compute",
                         "compute",
                         index,
-                        controller_url,
+                        worker_controller_url,
                         worker_duration_s,
                         worker_duration_s,
                         flavor_name_override=flavor,
@@ -495,7 +499,7 @@ def provision_openstack_run(
                     security_group.name,
                     keypair.name,
                     index,
-                    controller_url,
+                    worker_controller_url,
                     worker_duration_s,
                     duration_s,
                 ),
@@ -507,6 +511,10 @@ def provision_openstack_run(
 
     atomic_write_json(run_dir / "placement.json", placement)
     return {"controller_url": controller_url, "project_conn": project_conn, "tracker": tracker}
+
+
+def _network_sender_legacy_peers(receiver_ips: list[str], planned_flows: bool) -> list[str]:
+    return [] if planned_flows else receiver_ips
 
 
 def _create_worker(

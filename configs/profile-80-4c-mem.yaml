@@ -53,6 +53,7 @@ workloads:
     enabled: true
     engine: rally
     run_from: local
+    rally_mode: saturation
     rally_concurrency: 32
     rally_times: null
     rally_include_create_delete: false

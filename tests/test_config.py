@@ -163,6 +163,7 @@ capacity:
 workloads:
   api:
     engine: rally
+    rally_mode: single_task
     rally_concurrency: 12
     rally_times: 120
 """,
@@ -172,6 +173,7 @@ workloads:
     config = load_config(path)
 
     assert config.workloads.api.engine == "rally"
+    assert config.workloads.api.rally_mode == "single_task"
     assert config.workloads.api.rally_concurrency == 12
     assert config.workloads.api.rally_times == 120
 
@@ -211,6 +213,16 @@ workloads:
     config = load_config(path)
 
     assert config.workloads.compute.worker_count == 282
+
+
+def test_network_reverse_and_bidirectional_are_mutually_exclusive():
+    config = load_config(FIXTURE)
+    payload = config.model_dump(mode="json")
+    payload["workloads"]["network"]["reverse"] = True
+    payload["workloads"]["network"]["bidirectional"] = True
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        type(config).model_validate(payload)
 
 
 def test_load_config_accepts_targets_without_legacy_capacity(tmp_path):

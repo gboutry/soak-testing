@@ -1,0 +1,14 @@
+experiments:
+  - name: workers-32-flow-16-p8
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 8
+      workloads.network.target_gbps_per_flow: 16
+      workloads.network.sender_worker_target_gbps: 25
+      workloads.network.receiver_worker_target_gbps: 25
+      workloads.network.max_flows: 40
+      workloads.network.max_workers: 32
+      workloads.network.zerocopy: false
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false

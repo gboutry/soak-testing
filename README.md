@@ -60,14 +60,36 @@ targets:
 workloads:
   network:
     topology: full_mesh
+    flow_duration: 60s
+    omit_seconds: 10
     target_gbps_per_flow: 5
+    parallel_streams_per_flow: 16
     sender_worker_target_gbps: 20
     receiver_worker_target_gbps: 20
+    zerocopy: true
+    tcp_window: 16M
 ```
 
 With `scope: per_host`, `--target 80` means `160 Gbit/s` per selected compute
 host. If host names are not listed in config, `soak-tester` tries to discover
 enabled hypervisors with admin Nova credentials and records them in the plan.
+
+For cross-host east-west tuning, use the matrix runner to create reproducible
+config variants and repeated network-only calibration runs:
+
+```bash
+PYTHONPATH=src scripts/run_network_tuning_matrix.py \
+  --os-cloud admin \
+  --base-config configs/network-diagnose-2host-8vm.yaml \
+  --matrix configs/network-tuning-matrix.yaml \
+  --duration 3m \
+  --repetitions 3 \
+  --command soak-tester
+```
+
+The runner writes generated configs plus `network-tuning-results.json` and
+`network-tuning-results.md`. It reports workload-observed iperf goodput and
+cross-host flow validation; it does not prove physical fabric throughput.
 
 `soak-tester calibrate cloud` writes `runs/<run-id>/calibration.json` and
 `runs/<run-id>/calibrated-capacity.yaml`. Compute capacity is discovered from
@@ -118,6 +140,7 @@ The API plane supports two engines:
 workloads:
   api:
     engine: rally
+    rally_mode: saturation
     rally_concurrency: 32
     rally_times: null
     rally_include_create_delete: true
@@ -126,10 +149,12 @@ workloads:
 `engine: rally` runs Rally on the host where `soak-tester` is executed and
 normalizes Rally results into `metrics.jsonl` and `final-report.*`. Rally is an
 optional runtime dependency; install `rally` and `rally-openstack` on the
-runner host before using this engine. The default Rally task currently uses
-token validation and list operations for Nova, Neutron, and Cinder. It avoids
-create/delete scenarios in the full-soak API mix because Rally-managed tenants
-need quota handling before those operations are reproducible.
+runner host before using this engine. `rally_mode: saturation` runs each
+selected Rally scenario for the full soak duration at `rally_concurrency`
+instead of targeting a configured ops/sec value. The default Rally saturation
+set uses token validation and list operations for Nova, Neutron, and Cinder. It
+avoids create/delete scenarios in the full-soak API mix because Rally-managed
+tenants need quota handling before those operations are reproducible.
 
 ## Artifact Layout
 
@@ -142,11 +167,17 @@ Runs are stored under `runs/<run-id>/` and include:
 - `metrics.jsonl`
 - `resources.json`
 - `placement.json`
+- `summary.json`
+- `summary.md`
 - `final-report.json`
 - `final-report.md`
 - `auth.json` with mode `0600`
 - `ssh/id_ed25519` with mode `0600`
 - `observability/prometheus-*` files when Prometheus collection is used
+
+`summary.md` is the human-readable per-domain summary for compute, network,
+storage, and API results. `summary.json` contains the same domain breakdown for
+automation.
 
 ## Cleanup Warning
 

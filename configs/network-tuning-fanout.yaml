@@ -1,0 +1,42 @@
+experiments:
+  - name: workers-16-flow-25-p16
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 16
+      workloads.network.target_gbps_per_flow: 25
+      workloads.network.sender_worker_target_gbps: 50
+      workloads.network.receiver_worker_target_gbps: 50
+      workloads.network.max_flows: 32
+      workloads.network.max_workers: 16
+      workloads.network.zerocopy: false
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: workers-16-flow-25-p8
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 8
+      workloads.network.target_gbps_per_flow: 25
+      workloads.network.sender_worker_target_gbps: 50
+      workloads.network.receiver_worker_target_gbps: 50
+      workloads.network.max_flows: 32
+      workloads.network.max_workers: 16
+      workloads.network.zerocopy: false
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: workers-24-flow-20-p8
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 8
+      workloads.network.target_gbps_per_flow: 20
+      workloads.network.sender_worker_target_gbps: 34
+      workloads.network.receiver_worker_target_gbps: 34
+      workloads.network.max_flows: 32
+      workloads.network.max_workers: 24
+      workloads.network.zerocopy: false
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false

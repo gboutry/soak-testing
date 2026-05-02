@@ -1,0 +1,87 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-mixed-benchmark
+  ssh_user: ubuntu
+  member_role: member
+
+management:
+  mode: floating_ip
+  controller_floating_ip: true
+  allowed_cidrs:
+    - 0.0.0.0/0
+  ssh_private_key_path: null
+
+resources:
+  project_prefix: soak-tester
+  create_project: true
+  create_project_user: true
+  create_router: true
+  network_cidr: 10.250.0.0/24
+  floating_ips:
+    controller: true
+    workers: false
+
+flavors:
+  controller: m1.benchmark
+  compute_worker: m1.benchmark-4c-mem
+  network_worker: m1.benchmark-4c-net
+  storage_worker: m1.benchmark
+  api_worker: m1.benchmark
+
+targets:
+  compute:
+    vcpus: 0
+    ram_gib: 0
+    cpu_resource_class: PCPU
+    ram_resource_class: MEMORY_MB
+  network:
+    gbps: 0
+  storage:
+    read_gbps: 0
+    write_gbps: 0
+    iops: 0
+  api:
+    ops_per_second: 0
+
+workloads:
+  api:
+    enabled: true
+    engine: rally
+    rally_mode: saturation
+    run_from: local
+    rally_concurrency: 32
+    rally_times: null
+    rally_include_create_delete: false
+    rally_error_rate_max: 0
+    operation_mix:
+      list_servers: 40
+      list_ports: 30
+      list_volumes: 20
+      create_delete_ports: 10
+
+  compute:
+    enabled: false
+
+  network:
+    enabled: false
+
+  storage:
+    enabled: false
+
+monitoring:
+  live_status:
+    enabled: true
+    refresh_interval: 5s
+  worker_metrics:
+    enabled: true
+    interval: 5s
+
+run:
+  warmup: 0s
+  cooldown: 0s
+  failure_budget: 0
+  stop_on_error: false
+  leave_running: false
+  cleanup_on_success: true
+
+boot_concurrency: 36

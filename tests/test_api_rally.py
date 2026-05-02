@@ -22,14 +22,32 @@ def test_render_rally_task_uses_control_plane_mix_and_constant_duration_runner()
 
     assert task["NovaServers.list_servers"][0]["runner"] == {
         "type": "constant_for_duration",
-        "duration": 120,
+        "duration": 600,
         "concurrency": 12,
     }
+    assert "context" not in task["NovaServers.list_servers"][0]
     assert "Authenticate.validate_nova" in task
     assert "Authenticate.validate_neutron" in task
     assert "Authenticate.validate_cinder" in task
     assert "NeutronNetworks.create_and_list_networks" not in task
     assert "CinderVolumes.create_and_delete_volume" not in task
+
+
+def test_render_rally_task_can_render_single_full_duration_scenario():
+    task = yaml.safe_load(
+        render_rally_task(
+            duration_seconds=300,
+            concurrency=64,
+            scenario_names=["NovaServers.list_servers"],
+        )
+    )
+
+    assert list(task) == ["NovaServers.list_servers"]
+    assert task["NovaServers.list_servers"][0]["runner"] == {
+        "type": "constant_for_duration",
+        "duration": 300,
+        "concurrency": 64,
+    }
 
 
 def test_parse_rally_results_summarizes_scenarios_and_atomic_actions():

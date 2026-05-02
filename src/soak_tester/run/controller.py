@@ -18,6 +18,7 @@ EVENTS = ROOT / 'events.jsonl'
 METRICS = ROOT / 'metrics.jsonl'
 CONSOLE = Path('/dev/console')
 DEBUG_CONSOLE = os.environ.get('SOAK_CONTROLLER_DEBUG_CONSOLE') == '1'
+METRICS_RESPONSE_LIMIT = int(os.environ.get('SOAK_CONTROLLER_METRICS_RESPONSE_LIMIT', '100000'))
 
 
 def mirror(kind, payload):
@@ -75,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
             events = EVENTS.read_text().splitlines()[-200:] if EVENTS.exists() else []
             self._json(200, {'events': [json.loads(x) for x in events if x]})
         elif self.path == '/metrics':
-            metrics = METRICS.read_text().splitlines()[-1000:] if METRICS.exists() else []
+            metrics = METRICS.read_text().splitlines()[-METRICS_RESPONSE_LIMIT:] if METRICS.exists() else []
             self._json(200, {'metrics': [json.loads(x) for x in metrics if x]})
         else:
             self._json(404, {'error': 'not found'})

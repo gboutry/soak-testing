@@ -5,6 +5,10 @@ import json
 from soak_tester.config import SoakConfig
 
 
+def _python_literal(value: object) -> str:
+    return repr(value)
+
+
 def worker_cloud_init(
     *,
     config: SoakConfig,
@@ -34,20 +38,26 @@ import urllib.request
 
 ROLE = {json.dumps(role)}
 WORKER_ID = {json.dumps(worker_id)}
-CONTROLLER = {json.dumps(controller_url)}
+CONTROLLER = {_python_literal(controller_url)}
 AGENT_DURATION = {duration_seconds}
 WORKLOAD_DURATION = {workload_duration_seconds}
-PEERS = {json.dumps(peers)}
-FLOW_ASSIGNMENTS = {json.dumps(flow_assignments)}
-RECEIVER_PORTS = {json.dumps(receiver_ports)}
+PEERS = {_python_literal(peers)}
+FLOW_ASSIGNMENTS = {_python_literal(flow_assignments)}
+RECEIVER_PORTS = {_python_literal(receiver_ports)}
 CPU_LOAD = {config.workloads.compute.cpu_load_percent}
 MEMORY_LOAD = {config.workloads.compute.memory_load_percent}
 FLOW_TIME = {int(config.workloads.network.flow_duration.rstrip("smhd"))}
 PARALLEL = {config.workloads.network.parallel_streams_per_flow}
-BITRATE = {json.dumps(str(config.workloads.network.target_gbps_per_flow) + "G")}
+BITRATE = {_python_literal(str(config.workloads.network.target_gbps_per_flow) + "G")}
+IPERF_OMIT_SECONDS = {config.workloads.network.omit_seconds}
+IPERF_TCP_WINDOW = {_python_literal(config.workloads.network.tcp_window)}
+IPERF_ZEROCOPY = {repr(config.workloads.network.zerocopy)}
+IPERF_REVERSE = {repr(config.workloads.network.reverse)}
+IPERF_BIDIRECTIONAL = {repr(config.workloads.network.bidirectional)}
+IPERF_EXTRA_CLIENT_ARGS = {_python_literal(config.workloads.network.extra_client_args)}
 IODEPTH = {config.workloads.storage.iodepth}
 NUMJOBS = {config.workloads.storage.numjobs}
-BLOCK_SIZE = {json.dumps(config.workloads.storage.block_size)}
+BLOCK_SIZE = {_python_literal(config.workloads.storage.block_size)}
 RWMIXREAD = {config.workloads.storage.rwmixread}
 SERVER_PROCS = []
 PARSED_IPERF_FILES = set()
@@ -211,12 +221,21 @@ def parse_iperf3_output():
             end = data.get('end', {{}})
             received = end.get('sum_received') or {{}}
             sent = end.get('sum_sent') or {{}}
-            goodput = received.get('bits_per_second') or sent.get('bits_per_second')
+            received_bps = received.get('bits_per_second')
+            sent_bps = sent.get('bits_per_second')
+            if IPERF_BIDIRECTIONAL and received_bps is not None and sent_bps is not None:
+                goodput = float(received_bps) + float(sent_bps)
+            else:
+                goodput = received_bps or sent_bps
             retransmits = sent.get('retransmits')
             metrics = []
             tags['flow_file'] = os.path.basename(path)
             if goodput is not None:
                 metrics.append(metric('network', 'iperf.goodput_bps', float(goodput), 'bps', tags))
+            if sent_bps is not None:
+                metrics.append(metric('network', 'iperf.sent_bps', float(sent_bps), 'bps', tags))
+            if received_bps is not None:
+                metrics.append(metric('network', 'iperf.received_bps', float(received_bps), 'bps', tags))
             if retransmits is not None:
                 metrics.append(metric('network', 'iperf.retransmits', float(retransmits), 'count', tags))
             post_many('/metrics', metrics)
@@ -294,14 +313,26 @@ while time.time() < agent_end:
                 receiver_ip = str(flow.get('receiver_private_ip') or '')
                 if not receiver_ip:
                     continue
-                flow_procs[flow_id] = subprocess.Popen([
+                command = [
                     'iperf3', '--client', receiver_ip,
                     '--port', str(flow.get('receiver_port') or 5201),
                     '--time', str(flow_time),
                     '--parallel', str(flow.get('parallel_streams') or PARALLEL),
                     '--bitrate', str(flow.get('target_gbps') or BITRATE.rstrip('G')) + 'G',
                     '--json',
-                ], stdout=open(path, 'w'), stderr=subprocess.STDOUT)
+                ]
+                if IPERF_OMIT_SECONDS:
+                    command.extend(['--omit', str(IPERF_OMIT_SECONDS)])
+                if IPERF_TCP_WINDOW:
+                    command.extend(['--window', str(IPERF_TCP_WINDOW)])
+                if IPERF_ZEROCOPY:
+                    command.append('--zerocopy')
+                if IPERF_REVERSE:
+                    command.append('--reverse')
+                if IPERF_BIDIRECTIONAL:
+                    command.append('--bidir')
+                command.extend(IPERF_EXTRA_CLIENT_ARGS)
+                flow_procs[flow_id] = subprocess.Popen(command, stdout=open(path, 'w'), stderr=subprocess.STDOUT)
                 flow_attempts[flow_id] = attempt + 1
                 flow_index += 1
     running_flows = sum(1 for item in flow_procs.values() if item.poll() is None)

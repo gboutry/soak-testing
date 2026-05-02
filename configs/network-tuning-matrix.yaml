@@ -1,0 +1,61 @@
+experiments:
+  - name: baseline
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 16
+      workloads.network.target_gbps_per_flow: 50
+      workloads.network.sender_worker_target_gbps: 100
+      workloads.network.receiver_worker_target_gbps: 100
+      workloads.network.zerocopy: false
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: zerocopy
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 16
+      workloads.network.target_gbps_per_flow: 50
+      workloads.network.sender_worker_target_gbps: 100
+      workloads.network.receiver_worker_target_gbps: 100
+      workloads.network.zerocopy: true
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: zerocopy-p32
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 32
+      workloads.network.target_gbps_per_flow: 50
+      workloads.network.sender_worker_target_gbps: 100
+      workloads.network.receiver_worker_target_gbps: 100
+      workloads.network.zerocopy: true
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: zerocopy-window-16m
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 32
+      workloads.network.target_gbps_per_flow: 50
+      workloads.network.sender_worker_target_gbps: 100
+      workloads.network.receiver_worker_target_gbps: 100
+      workloads.network.tcp_window: 16M
+      workloads.network.zerocopy: true
+      workloads.network.reverse: false
+      workloads.network.bidirectional: false
+
+  - name: bidirectional-zerocopy-p32
+    patch:
+      workloads.network.flow_duration: 60s
+      workloads.network.omit_seconds: 10
+      workloads.network.parallel_streams_per_flow: 32
+      workloads.network.target_gbps_per_flow: 50
+      workloads.network.sender_worker_target_gbps: 100
+      workloads.network.receiver_worker_target_gbps: 100
+      workloads.network.zerocopy: true
+      workloads.network.reverse: false
+      workloads.network.bidirectional: true
