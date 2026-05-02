@@ -388,7 +388,7 @@ def cleanup(
     state.status = "completed" if not any("error" in action for action in actions) else "cleanup-failed"
     state.timeline.cleanup_ended_at = utcnow_iso()
     save_state(run, state)
-    console.print("[yellow]OpenStack destructive cleanup requires wiring a live admin connection; dry-run actions shown instead.[/yellow]")
+    console.print(f"Cleanup finished with status: {state.status}")
     console.print(json.dumps(actions, indent=2))
 
 
