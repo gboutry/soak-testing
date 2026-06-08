@@ -28,6 +28,17 @@ def worker_cloud_init(
     script = f"""#!/bin/bash
 set -eux
 mkdir -p /var/log/soak-tester
+if [ {json.dumps(role.startswith("network-"))} = true ] && command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update || true
+    apt-get install -y ethtool pciutils iproute2 sysstat || true
+fi
+if [ {json.dumps(role.startswith("network-"))} = true ]; then
+    sysctl -w net.core.rmem_max=134217728 || true
+    sysctl -w net.core.wmem_max=134217728 || true
+    sysctl -w 'net.ipv4.tcp_rmem=4096 87380 134217728' || true
+    sysctl -w 'net.ipv4.tcp_wmem=4096 65536 134217728' || true
+fi
 cat >/usr/local/bin/soak-worker <<'PY'
 #!/usr/bin/env python3
 import json
@@ -111,6 +122,92 @@ def metric(plane, name, value, unit, tags=None):
 
 def has_command(name):
     return subprocess.call(['which', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def read_text(path):
+    try:
+        return open(path).read().strip()
+    except Exception:
+        return None
+
+
+def first_network_interface():
+    try:
+        route = subprocess.check_output(['ip', 'route', 'show', 'default'], text=True)
+        parts = route.split()
+        if 'dev' in parts:
+            return parts[parts.index('dev') + 1]
+    except Exception:
+        pass
+    try:
+        for name in sorted(os.listdir('/sys/class/net')):
+            if name == 'lo':
+                continue
+            if read_text('/sys/class/net/' + name + '/operstate') == 'up':
+                return name
+    except Exception:
+        pass
+    return None
+
+
+def count_queues(interface, prefix):
+    base = '/sys/class/net/' + interface + '/queues'
+    try:
+        return len([name for name in os.listdir(base) if name.startswith(prefix)])
+    except Exception:
+        return None
+
+
+def interface_driver(interface):
+    path = '/sys/class/net/' + interface + '/device/driver'
+    try:
+        return os.path.basename(os.path.realpath(path))
+    except Exception:
+        return None
+
+
+def interface_pci_id(interface):
+    base = '/sys/class/net/' + interface + '/device'
+    vendor = read_text(base + '/vendor')
+    device = read_text(base + '/device')
+    if vendor and device:
+        return vendor.replace('0x', '') + ':' + device.replace('0x', '')
+    return None
+
+
+def ethtool_offloads(interface):
+    if not has_command('ethtool'):
+        return {{}}
+    try:
+        output = subprocess.check_output(['ethtool', '-k', interface], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return {{}}
+    wanted = ('tcp-segmentation-offload', 'generic-segmentation-offload', 'generic-receive-offload')
+    values = {{}}
+    for line in output.splitlines():
+        stripped = line.strip()
+        for key in wanted:
+            if stripped.startswith(key + ':'):
+                values[key] = stripped.split(':', 1)[1].strip()
+    return values
+
+
+def collect_network_interface_info():
+    interface = first_network_interface()
+    if not interface:
+        return {{'error': 'no active interface found'}}
+    return {{
+        'interface': interface,
+        'driver': interface_driver(interface),
+        'pci_id': interface_pci_id(interface),
+        'speed_mbps': read_text('/sys/class/net/' + interface + '/speed'),
+        'duplex': read_text('/sys/class/net/' + interface + '/duplex'),
+        'mtu': read_text('/sys/class/net/' + interface + '/mtu'),
+        'rx_queues': count_queues(interface, 'rx-'),
+        'tx_queues': count_queues(interface, 'tx-'),
+        'numa_node': read_text('/sys/class/net/' + interface + '/device/numa_node'),
+        'offloads': ethtool_offloads(interface),
+    }}
 
 
 def _read_cpu_times():
@@ -285,6 +382,8 @@ def parse_fio_output():
 agent_end = time.time() + AGENT_DURATION
 workload_end = time.time() + WORKLOAD_DURATION
 proc = start_workload()
+if ROLE.startswith('network-'):
+    post('/events', event('info', 'network', 'network_interface_validation', collect_network_interface_info()))
 storage_parsed = False
 flow_index = 0
 flow_procs = {{}}

@@ -197,21 +197,14 @@ def provision_openstack_run(
     del private_key
 
     control_meta = owned_metadata(run_id, "control", "controller", project_name)
-    network = project_conn.network.create_network(
-        name=f"{project_name}-net",
+    network = _create_private_network(
+        project_conn,
+        tracker,
+        project_name=project_name,
         project_id=project_id,
-        description=f"soak-tester network for {run_id}",
-    )
-    _tag(project_conn, network, control_meta)
-    tracker.add(
-        resource_record(
-            "network",
-            network.id,
-            network.name,
-            plane="network",
-            role="private-network",
-            metadata=control_meta,
-        )
+        run_id=run_id,
+        config=config,
+        metadata=control_meta,
     )
 
     subnet = project_conn.network.create_subnet(
@@ -517,6 +510,47 @@ def _network_sender_legacy_peers(receiver_ips: list[str], planned_flows: bool) -
     return [] if planned_flows else receiver_ips
 
 
+def _create_private_network(
+    conn: Any,
+    tracker: ResourceTracker,
+    *,
+    project_name: str,
+    project_id: str,
+    run_id: str,
+    config: SoakConfig,
+    metadata: dict[str, str] | None = None,
+) -> Any:
+    metadata = metadata or owned_metadata(run_id, "control", "controller", project_name)
+    payload: dict[str, Any] = {
+        "name": f"{project_name}-net",
+        "project_id": project_id,
+        "description": f"soak-tester network for {run_id}",
+    }
+    if config.resources.network_mtu is not None:
+        payload["mtu"] = config.resources.network_mtu
+    network = conn.network.create_network(**payload)
+    if config.resources.network_mtu is not None:
+        actual_mtu = getattr(network, "mtu", None)
+        if actual_mtu is not None and int(actual_mtu) != config.resources.network_mtu:
+            raise RuntimeError(
+                f"created network MTU {actual_mtu} does not match requested "
+                f"{config.resources.network_mtu}"
+            )
+    _tag(conn, network, metadata)
+    tracker.add(
+        resource_record(
+            "network",
+            network.id,
+            network.name,
+            plane="network",
+            role="private-network",
+            metadata=metadata,
+            extra={"mtu": config.resources.network_mtu},
+        )
+    )
+    return network
+
+
 def _create_worker(
     conn: Any,
     tracker: ResourceTracker,
@@ -551,12 +585,26 @@ def _create_worker(
     }[plane]
     flavor_name = flavor_name_override or flavor_name
     availability_zone = _availability_zone_for_host(planned_host)
+    port_id = None
+    if plane == "network" and config.workloads.network.vnic_type == "direct":
+        port = _create_direct_worker_port(
+            conn,
+            tracker,
+            config=config,
+            name=f"{project_name}-{worker_id}-port",
+            network_id=network_id,
+            security_group_name=security_group_name,
+            metadata=metadata,
+            role=role,
+        )
+        port_id = port.id
     server = _boot_server(
         conn,
         name=f"{project_name}-{worker_id}",
         image_id=image_id,
         flavor_name=flavor_name,
         network_id=network_id,
+        port_id=port_id,
         security_group_name=security_group_name,
         key_name=key_name,
         user_data=worker_cloud_init(
@@ -587,6 +635,50 @@ def _create_worker(
     with placement_lock:
         placement.append(placement_record(worker_id, server, plane=plane, role=role))
     return server
+
+
+def _create_direct_worker_port(
+    conn: Any,
+    tracker: ResourceTracker,
+    *,
+    config: SoakConfig,
+    name: str,
+    network_id: str,
+    security_group_name: str,
+    metadata: dict[str, str],
+    role: str,
+) -> Any:
+    port_payload: dict[str, Any] = {
+        "name": name,
+        "network_id": network_id,
+        "binding_vnic_type": "direct",
+    }
+    if config.workloads.network.hardware_offload_type is not None:
+        port_payload["hardware_offload_type"] = config.workloads.network.hardware_offload_type
+    if config.workloads.network.port_security_enabled:
+        security_group = conn.network.find_security_group(security_group_name)
+        port_payload["security_group_ids"] = [security_group.id] if security_group is not None else []
+    else:
+        port_payload["port_security_enabled"] = False
+        port_payload["security_group_ids"] = []
+    port = conn.network.create_port(**port_payload)
+    _tag(conn, port, metadata)
+    tracker.add(
+        resource_record(
+            "port",
+            port.id,
+            port.name,
+            plane="network",
+            role=role,
+            metadata=metadata,
+            extra={
+                "vnic_type": "direct",
+                "hardware_offload_type": config.workloads.network.hardware_offload_type,
+                "port_security_enabled": config.workloads.network.port_security_enabled,
+            },
+        )
+    )
+    return port
 
 
 def _create_storage_worker(
@@ -681,6 +773,7 @@ def _boot_server(
     image_id: str,
     flavor_name: str,
     network_id: str,
+    port_id: str | None = None,
     security_group_name: str,
     key_name: str,
     user_data: str,
@@ -692,12 +785,13 @@ def _boot_server(
         "name": name,
         "image_id": image_id,
         "flavor_id": flavor.id,
-        "networks": [{"uuid": network_id}],
-        "security_groups": [{"name": security_group_name}],
+        "networks": [{"port": port_id}] if port_id else [{"uuid": network_id}],
         "key_name": key_name,
         "user_data": base64.b64encode(user_data.encode()).decode(),
         "metadata": metadata,
     }
+    if not port_id:
+        payload["security_groups"] = [{"name": security_group_name}]
     if availability_zone:
         payload["availability_zone"] = availability_zone
     return conn.compute.create_server(**payload)

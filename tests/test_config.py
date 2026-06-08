@@ -21,6 +21,8 @@ def test_load_config_accepts_example_schema():
     assert config.calibration.pass_ratio == 0.95
     assert config.calibration.network_direction == "egress"
     assert config.resources.network_cidr == "10.250.0.0/24"
+    assert config.resources.network_mtu is None
+    assert config.workloads.network.vnic_type == "normal"
     assert config.workloads.storage.volume_type == "ceph-ssd"
     assert config.observability.prometheus.query_packs == ["node-exporter-network"]
 
@@ -58,6 +60,42 @@ capacity:
     config = load_config(path)
 
     assert config.boot_concurrency == 12
+
+
+def test_load_config_accepts_optional_network_mtu(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+resources:
+  network_mtu: 8942
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.resources.network_mtu == 8942
 
 
 def test_api_operation_mix_rejects_unknown_operations(tmp_path):
@@ -223,6 +261,47 @@ def test_network_reverse_and_bidirectional_are_mutually_exclusive():
 
     with pytest.raises(ValueError, match="mutually exclusive"):
         type(config).model_validate(payload)
+
+
+def test_network_workload_accepts_direct_vnic_type(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+openstack:
+  external_network: ext-net
+  image: ubuntu
+flavors:
+  controller: m1.small
+  compute_worker: m1.small
+  network_worker: m1.small
+  storage_worker: m1.small
+  api_worker: m1.small
+capacity:
+  compute:
+    vcpus: 1
+    ram_gib: 1
+  network:
+    gbps: 1
+  storage:
+    read_gbps: 1
+    write_gbps: 1
+    iops: 1
+  api:
+    ops_per_second: 1
+workloads:
+  network:
+    vnic_type: direct
+    hardware_offload_type: switchdev
+    port_security_enabled: false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.workloads.network.vnic_type == "direct"
+    assert config.workloads.network.hardware_offload_type == "switchdev"
+    assert config.workloads.network.port_security_enabled is False
 
 
 def test_load_config_accepts_targets_without_legacy_capacity(tmp_path):

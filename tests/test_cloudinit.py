@@ -104,6 +104,28 @@ def test_network_worker_cloud_init_emits_python_none_for_optional_iperf_window()
     assert "IPERF_TCP_WINDOW = null" not in script
 
 
+def test_network_worker_cloud_init_reports_guest_network_validation():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.workloads.network.vnic_type = "direct"
+
+    script = worker_cloud_init(
+        config=config,
+        role="network-sender",
+        worker_id="network-sender-000",
+        controller_url="http://controller:8080",
+        duration_seconds=60,
+    )
+
+    assert "collect_network_interface_info()" in script
+    assert "network_interface_validation" in script
+    assert "'driver'" in script
+    assert "'speed_mbps'" in script
+    assert "'mtu'" in script
+    assert "'rx_queues'" in script
+    assert "'tx_queues'" in script
+    assert "'pci_id'" in script
+
+
 def test_controller_cloud_init_uses_threaded_http_server_without_console_spam():
     script = controller_cloud_init()
 

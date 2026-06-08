@@ -68,11 +68,38 @@ workloads:
     receiver_worker_target_gbps: 20
     zerocopy: true
     tcp_window: 16M
+    vnic_type: normal
 ```
 
 With `scope: per_host`, `--target 80` means `160 Gbit/s` per selected compute
 host. If host names are not listed in config, `soak-tester` tries to discover
 enabled hypervisors with admin Nova credentials and records them in the plan.
+
+Set `workloads.network.vnic_type: direct` only for network-plane experiments
+that should boot sender and receiver VMs from explicit Neutron ports with
+`binding:vnic_type=direct`. For OVN/Geneve switchdev offload experiments, set
+`hardware_offload_type: switchdev` and usually `port_security_enabled: false`
+for the first validation pass. Other worker planes keep normal tenant-network
+ports.
+
+For high-throughput offloaded Geneve tests, set `resources.network_mtu` to the
+tenant MTU you expect the cloud to support, for example `8942` when the
+underlay and Geneve configuration support jumbo frames. If unset, Neutron's
+deployment default is used, which may be a small value such as `1442` on a
+1500-byte underlay. The matching network worker flavor must already exist and
+should carry Nova extra specs for dedicated CPUs and PCI locality, for example:
+
+```bash
+openstack flavor set m1.benchmark-net-direct-16c \
+  --property hw:cpu_policy=dedicated \
+  --property hw:emulator_threads_policy=share \
+  --property hw:pci_numa_affinity_policy=required \
+  --property hw:numa_nodes=1
+```
+
+`hw:numa_nodes=1` means one guest NUMA cell; it does not select host NUMA node
+1. Nova selects the host NUMA node local to the VF through
+`hw:pci_numa_affinity_policy`.
 
 For cross-host east-west tuning, use the matrix runner to create reproducible
 config variants and repeated network-only calibration runs:

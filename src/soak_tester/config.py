@@ -38,6 +38,7 @@ class ResourcesConfig(BaseModel):
     create_project_user: bool = True
     create_router: bool = True
     network_cidr: str = "10.250.0.0/24"
+    network_mtu: int | None = Field(default=None, ge=576)
     floating_ips: FloatingIPConfig = Field(default_factory=FloatingIPConfig)
 
 
@@ -129,6 +130,9 @@ class NetworkWorkloadConfig(BaseModel):
     enabled: bool = True
     protocol: Literal["tcp"] = "tcp"
     tool: Literal["iperf3"] = "iperf3"
+    vnic_type: Literal["normal", "direct"] = "normal"
+    hardware_offload_type: Literal["switchdev"] | None = None
+    port_security_enabled: bool = True
     topology: Literal["paired", "full_mesh"] = "paired"
     flow_duration: str = "60s"
     omit_seconds: int = Field(default=0, ge=0)

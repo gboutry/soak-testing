@@ -19,6 +19,7 @@ resources:
   create_project_user: true
   create_router: true
   network_cidr: 10.250.0.0/24
+  network_mtu: null
   floating_ips:
     controller: true
     workers: false
