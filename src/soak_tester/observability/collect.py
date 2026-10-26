@@ -30,16 +30,20 @@ def inspect_prometheus(run_dir: Path) -> dict[str, Any]:
 
 def collect_prometheus(run_dir: Path) -> dict[str, Any]:
     config = load_config(run_dir / "config.yaml")
+    if not config.observability.prometheus.enabled:
+        raise ValueError("Prometheus collection is disabled")
     state = load_state(run_dir)
     placement = read_json(run_dir / "placement.json", default=[])
     obs_dir = ensure_dir(run_dir / "observability")
     compute_hosts = _compute_hosts_regex(placement)
+    if not compute_hosts:
+        raise ValueError("No actual placement hosts available for Prometheus collection")
     queries: dict[str, str] = {}
     for pack in config.observability.prometheus.query_packs:
         queries.update(
             render_builtin_pack(
                 pack,
-                compute_hosts=compute_hosts or ".*",
+                compute_hosts=compute_hosts,
                 network_devices=config.observability.prometheus.network.device_regex,
                 excluded_network_devices=config.observability.prometheus.network.exclude_device_regex,
             )
@@ -63,23 +67,28 @@ def collect_prometheus(run_dir: Path) -> dict[str, Any]:
     atomic_write_json(obs_dir / "prometheus-results.json", results)
     summary = summarize_prometheus_results(results)
     atomic_write_json(obs_dir / "prometheus-summary.json", summary)
-    (obs_dir / "prometheus-summary.md").write_text(render_prometheus_summary(summary), encoding="utf-8")
+    (obs_dir / "prometheus-summary.md").write_text(
+        render_prometheus_summary(summary), encoding="utf-8"
+    )
     return summary
 
 
 def summarize_prometheus_results(results: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for name, payload in results.items():
-        values: list[float] = []
+        by_time = {}
         for series in payload.get("data", {}).get("result", []):
-            for _, value in series.get("values", []):
-                values.append(float(value))
-        summary[name] = summarize_series(values)
-    if "compute_host_network_rx_bps" in summary and "compute_host_network_tx_bps" in summary:
-        summary["compute_host_network_rx_tx_avg_gbps"] = (
-            summary["compute_host_network_rx_bps"]["avg_gbps"]
-            + summary["compute_host_network_tx_bps"]["avg_gbps"]
+            for ts, value in series.get("values", []):
+                by_time.setdefault(ts, []).append(float(value))
+        summary[name] = (
+            summarize_series([sum(values) for values in by_time.values()])
+            if by_time
+            else {"status": "no_data", "sample_count": 0}
         )
+        summary[name]["statistic"] = (
+            "sum of selected host interface rates at each timestamp, then sample mean"
+        )
+        summary[name]["series_count"] = len(payload.get("data", {}).get("result", []))
     return summary
 
 
@@ -94,10 +103,6 @@ def render_prometheus_summary(summary: dict[str, Any]) -> str:
 
 def _compute_hosts_regex(placement: list[dict[str, Any]]) -> str:
     hosts = sorted(
-        {
-            item.get("hypervisor_hostname")
-            for item in placement
-            if item.get("hypervisor_hostname")
-        }
+        {item.get("hypervisor_hostname") for item in placement if item.get("hypervisor_hostname")}
     )
     return "|".join(re.escape(host) for host in hosts)

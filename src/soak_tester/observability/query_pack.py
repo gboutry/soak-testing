@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 BUILTIN_QUERY_PACKS: dict[str, dict[str, str]] = {
     "node-exporter-network": {
         "compute_host_network_rx_bps": """
@@ -42,6 +44,6 @@ def render_builtin_pack(
     for query_name, template in BUILTIN_QUERY_PACKS[name].items():
         query = template
         for key, value in replacements.items():
-            query = query.replace(key, value)
+            query = query.replace(key, json.dumps(value)[1:-1])
         rendered[query_name] = query
     return rendered

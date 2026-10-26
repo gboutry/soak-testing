@@ -1,56 +1,26 @@
 openstack:
   external_network: ext-net
   image: ubuntu-soak
-  ssh_user: ubuntu
   member_role: member
-
 boot_concurrency: 1
-
 management:
-  mode: floating_ip
-  controller_floating_ip: true
   allowed_cidrs:
-    - 0.0.0.0/0
-  ssh_private_key_path: null
-
+  - 0.0.0.0/0
 resources:
   project_prefix: soak-tester
-  create_project: true
-  create_project_user: true
   create_router: true
   network_cidr: 10.250.0.0/24
   network_mtu: null
   floating_ips:
     controller: true
-    workers: false
-
 flavors:
   controller: m1.soak-controller
   compute_worker: m1.soak-compute
   network_worker: m1.soak-net
   storage_worker: m1.soak-fio
-  api_worker: m1.soak-api
-
-capacity:
-  compute:
-    vcpus: 960
-    ram_gib: 3072
-    cpu_resource_class: auto
-    ram_resource_class: MEMORY_MB
-    per_host_ram_gib: null
-  network:
-    gbps: 600
-  storage:
-    read_gbps: 160
-    write_gbps: 80
-    iops: 500000
-  api:
-    ops_per_second: 100
-
 workloads:
   api:
     enabled: true
-    run_from: local
     operation_mix:
       list_servers: 40
       list_ports: 30
@@ -62,8 +32,6 @@ workloads:
     memory_load_percent: 70
   network:
     enabled: true
-    protocol: tcp
-    tool: iperf3
     flow_duration: 60s
     parallel_streams_per_flow: 4
     target_gbps_per_flow: 10
@@ -76,17 +44,7 @@ workloads:
     iodepth: 32
     numjobs: 4
     rwmixread: 70
-
-monitoring:
-  live_status:
-    enabled: true
-    refresh_interval: 5s
-  worker_metrics:
-    enabled: true
-    interval: 5s
-
 observability:
-  enabled: true
   prometheus:
     enabled: true
     url: http://prometheus.example.internal:9090
@@ -100,27 +58,22 @@ observability:
     tls:
       verify: true
       ca_file: null
-    labels:
-      host_label: instance
-      hostname_label: hostname
     network:
-      enabled: true
-      device_regex: "bond.*|eno.*|ens.*|eth.*"
-      exclude_device_regex: "lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*"
+      device_regex: bond.*|eno.*|ens.*|eth.*
+      exclude_device_regex: lo|docker.*|veth.*|tap.*|qbr.*|qvo.*|qvb.*
     query_packs:
-      - node-exporter-network
-
-calibration:
-  pass_ratio: 0.95
-  ramp_duration: 3m
-  validation_duration: 10m
-  derate_policy: auto_once
-  network_direction: egress
-
+    - node-exporter-network
 run:
-  warmup: 5m
-  cooldown: 2m
-  failure_budget: 5
-  stop_on_error: false
-  leave_running: false
-  cleanup_on_success: true
+  keep_resources: false
+targets:
+  compute:
+    vcpus: 960
+    ram_gib: 3072
+  network:
+    gbps: 600
+  storage:
+    read_gbps: 160
+    write_gbps: 80
+    iops: 500000
+  api:
+    ops_per_second: 100

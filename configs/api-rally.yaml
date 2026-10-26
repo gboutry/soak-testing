@@ -1,0 +1,21 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-soak
+management:
+  allowed_cidrs:
+  - 198.51.100.10/32
+flavors:
+  controller: soak-controller
+targets: {}
+workloads:
+  compute:
+    enabled: false
+  network:
+    enabled: false
+  storage:
+    enabled: false
+  api:
+    enabled: true
+    engine: rally
+    rally_mode: saturation
+    rally_concurrency: 4

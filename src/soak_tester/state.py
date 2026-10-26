@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import contextmanager
+import fcntl
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -46,12 +48,13 @@ class RunState(BaseModel):
     project_name: str | None = None
     controller_url: str | None = None
     stop_requested: bool = False
-    failure_budget_remaining: int = 0
     timeline: Timeline = Field(default_factory=Timeline)
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
-def initial_state(run_id: str, *, target_percent: float, os_cloud: str, duration: str | None) -> RunState:
+def initial_state(
+    run_id: str, *, target_percent: float, os_cloud: str, duration: str | None
+) -> RunState:
     return RunState(
         run_id=run_id,
         status="planned",
@@ -68,7 +71,14 @@ def load_state(run_dir: Path) -> RunState:
 
 
 def save_state(run_dir: Path, state: RunState) -> None:
-    atomic_write_json(run_dir / "state.json", state.model_dump(mode="json"))
+    # A separate `stop` command must survive periodic status writes.
+    # Serialize the merge and replacement independently of the whole-run lock,
+    # which must remain held while another process requests stop.
+    with (run_dir / "state.lock").open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        current = read_json(run_dir / "state.json", {}) or {}
+        state.stop_requested = state.stop_requested or current.get("stop_requested", False)
+        atomic_write_json(run_dir / "state.json", state.model_dump(mode="json"))
 
 
 def update_status(run_dir: Path, status: RunStatus) -> RunState:
@@ -76,3 +86,17 @@ def update_status(run_dir: Path, status: RunStatus) -> RunState:
     state.status = status
     save_state(run_dir, state)
     return state
+
+
+@contextmanager
+def run_lock(run_dir: Path):
+    """Prevent the runner and manual cleanup from mutating the same run concurrently."""
+    with (run_dir / "run.lock").open("a") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Run is active; request stop and wait before cleanup") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)

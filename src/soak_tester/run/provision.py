@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import threading
+import uuid
+import secrets
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,17 +16,25 @@ from soak_tester.openstack_client.compute import placement_record, server_privat
 from soak_tester.openstack_client.identity import create_project_user, get_role
 from soak_tester.openstack_client.network import create_security_group_rules
 from soak_tester.openstack_client.quota import set_unlimited_project_quotas
-from soak_tester.openstack_client.resources import owned_metadata, resource_record, tags_from_metadata
+from soak_tester.openstack_client.resources import (
+    owned_metadata,
+    resource_record,
+    tags_from_metadata,
+)
 from soak_tester.planner import SoakPlan
+from soak_tester.run.collect import wait_for_worker_heartbeats
 from soak_tester.run.controller import controller_cloud_init
-from soak_tester.util import atomic_write_json, duration_seconds, ensure_dir
+from soak_tester.util import atomic_write_json, atomic_write_text, duration_seconds, ensure_dir
 from soak_tester.workloads.cloudinit import worker_cloud_init
 
 
 class ResourceTracker:
-    def __init__(self, run_dir: Path):
+    def __init__(self, run_dir: Path, *, stop_requested=lambda: False):
         self.run_dir = run_dir
+        self.stop_requested = stop_requested
         self.path = run_dir / "resources.json"
+        if self.path.exists():
+            raise FileExistsError(f"Refusing to overwrite the resource manifest: {self.path}")
         self.resources: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self.flush()
@@ -33,6 +43,8 @@ class ResourceTracker:
         with self._lock:
             self.resources.append(record)
             self._flush_unlocked()
+        if self.stop_requested():
+            raise InterruptedError("Stop requested after recording created resource")
 
     def flush(self) -> None:
         with self._lock:
@@ -66,40 +78,6 @@ def record_auth(run_dir: Path, payload: dict[str, Any]) -> None:
     atomic_write_json(run_dir / "auth.json", payload, mode=0o600)
 
 
-def provision_skeleton(
-    *,
-    run_dir: Path,
-    run_id: str,
-    project_name: str,
-    config: SoakConfig,
-    conn: Any | None = None,
-) -> ResourceTracker:
-    tracker = ResourceTracker(run_dir)
-    metadata = owned_metadata(run_id, "control", "controller", project_name)
-    tracker.add(
-        resource_record(
-            "project",
-            project_name,
-            project_name,
-            plane="control",
-            role="project",
-            metadata=metadata,
-        )
-    )
-    generate_ssh_keypair(run_dir)
-    record_auth(
-        run_dir,
-        {
-            "project_name": project_name,
-            "username": project_name,
-            "password": "<generated-at-runtime>",
-            "user_domain_name": config.openstack.user_domain_name,
-            "project_domain_name": config.openstack.project_domain_name,
-        },
-    )
-    return tracker
-
-
 def provision_openstack_run(
     *,
     run_dir: Path,
@@ -109,13 +87,38 @@ def provision_openstack_run(
     plan: SoakPlan,
     admin_conn: Any,
     duration: str,
+    stop_requested=lambda: False,
 ) -> dict[str, Any]:
-    tracker = ResourceTracker(run_dir)
+    tracker = ResourceTracker(run_dir, stop_requested=stop_requested)
+    control_token = secrets.token_urlsafe(32)
+    atomic_write_text(run_dir / "controller-token", control_token, mode=0o600)
+    description = f"soak-tester owned run {run_id} {uuid.uuid4()}"
+    atomic_write_json(
+        run_dir / "ownership-intent.json", {"name": project_name, "description": description}
+    )
+    project_metadata = owned_metadata(run_id, "control", "project", project_name)
+
+    def record_identity(kind: str, resource: Any) -> None:
+        tracker.add(
+            resource_record(
+                kind,
+                resource.id,
+                resource.name,
+                plane="control",
+                role=kind,
+                metadata=project_metadata,
+            )
+        )
+
     identity = create_project_user(
         admin_conn,
         project_name=project_name,
         username=project_name,
         role_name=config.openstack.member_role,
+        record_created=record_identity,
+        description=description,
+        project_domain_name=config.openstack.project_domain_name,
+        user_domain_name=config.openstack.user_domain_name,
     )
     project = identity["project"]
     user = identity["user"]
@@ -128,27 +131,6 @@ def provision_openstack_run(
             user=user.id,
             role=admin_role.id,
         )
-    project_metadata = owned_metadata(run_id, "control", "project", project_name)
-    tracker.add(
-        resource_record(
-            "project",
-            project.id,
-            project.name,
-            plane="control",
-            role="project",
-            metadata=project_metadata,
-        )
-    )
-    tracker.add(
-        resource_record(
-            "user",
-            user.id,
-            user.name,
-            plane="control",
-            role="user",
-            metadata=project_metadata,
-        )
-    )
     quota_result = set_unlimited_project_quotas(admin_conn, project_id)
     tracker.add(
         resource_record(
@@ -214,7 +196,6 @@ def provision_openstack_run(
         cidr=config.resources.network_cidr,
         project_id=project_id,
     )
-    _tag(project_conn, subnet, control_meta)
     tracker.add(
         resource_record(
             "subnet",
@@ -225,8 +206,13 @@ def provision_openstack_run(
             metadata=control_meta,
         )
     )
+    _tag(project_conn, subnet, control_meta)
 
-    external = project_conn.network.find_network(config.openstack.external_network)
+    external = (
+        project_conn.network.find_network(config.openstack.external_network)
+        if config.resources.create_router
+        else None
+    )
     router = None
     if config.resources.create_router:
         router = project_conn.network.create_router(
@@ -234,7 +220,6 @@ def provision_openstack_run(
             external_gateway_info={"network_id": external.id},
             project_id=project_id,
         )
-        _tag(project_conn, router, control_meta)
         tracker.add(
             resource_record(
                 "router",
@@ -245,6 +230,7 @@ def provision_openstack_run(
                 metadata=control_meta,
             )
         )
+        _tag(project_conn, router, control_meta)
         project_conn.network.add_interface_to_router(router, subnet_id=subnet.id)
         tracker.add(
             resource_record(
@@ -263,7 +249,6 @@ def provision_openstack_run(
         description=f"soak-tester security group for {run_id}",
         project_id=project_id,
     )
-    _tag(project_conn, security_group, control_meta)
     tracker.add(
         resource_record(
             "security_group",
@@ -274,6 +259,7 @@ def provision_openstack_run(
             metadata=control_meta,
         )
     )
+    _tag(project_conn, security_group, control_meta)
     create_security_group_rules(
         project_conn,
         security_group,
@@ -304,7 +290,9 @@ def provision_openstack_run(
         network_id=network.id,
         security_group_name=security_group.name,
         key_name=keypair.name,
-        user_data=controller_cloud_init(),
+        user_data=controller_cloud_init(
+            token=control_token, port=config.management.controller_status_port
+        ),
         metadata=control_meta,
     )
     tracker.add(
@@ -344,13 +332,15 @@ def provision_openstack_run(
         )
         controller_port = _server_port(project_conn, controller.id)
         project_conn.network.update_ip(fip, port_id=controller_port.id)
-        controller_url = f"http://{fip.floating_ip_address}:{config.management.controller_status_port}"
+        controller_url = (
+            f"http://{fip.floating_ip_address}:{config.management.controller_status_port}"
+        )
 
     placement.append(placement_record("controller", controller, plane="control", role="controller"))
+    atomic_write_json(run_dir / "placement.json", placement)
 
     duration_s = duration_seconds(duration)
     worker_duration_s = duration_s + 3600
-    receiver_ips: list[str] = []
     receiver_ip_by_worker_id: dict[str, str] = {}
     receiver_servers = _run_boot_tasks(
         [
@@ -373,7 +363,7 @@ def provision_openstack_run(
                     index,
                     worker_controller_url,
                     worker_duration_s,
-                    worker_duration_s,
+                    duration_s,
                     receiver_ports=[
                         flow.receiver_port
                         for flow in plan.network.flow_assignments
@@ -391,10 +381,16 @@ def provision_openstack_run(
     for index, server in enumerate(receiver_servers):
         worker_id = f"network-receiver-{index:03d}"
         if ip := server_private_ip(server):
-            receiver_ips.append(ip)
             receiver_ip_by_worker_id[worker_id] = ip
 
-    planned_flows = bool(plan.network.flow_assignments)
+    if plan.network.sender_count and plan.network.receiver_count:
+        _wait_for_network_receivers(
+            controller_url,
+            plan.network.receiver_count,
+            diagnostics_path=run_dir / "readiness-receivers.jsonl",
+            stop_requested=stop_requested,
+        )
+
     _run_boot_tasks(
         [
             (
@@ -416,8 +412,7 @@ def provision_openstack_run(
                     index,
                     worker_controller_url,
                     worker_duration_s,
-                    worker_duration_s,
-                    peers=_network_sender_legacy_peers(receiver_ips, planned_flows),
+                    duration_s,
                     flow_assignments=[
                         {
                             **flow.model_dump(mode="json"),
@@ -467,7 +462,7 @@ def provision_openstack_run(
                         index,
                         worker_controller_url,
                         worker_duration_s,
-                        worker_duration_s,
+                        duration_s,
                         flavor_name_override=flavor,
                     ),
                 )
@@ -506,10 +501,6 @@ def provision_openstack_run(
     return {"controller_url": controller_url, "project_conn": project_conn, "tracker": tracker}
 
 
-def _network_sender_legacy_peers(receiver_ips: list[str], planned_flows: bool) -> list[str]:
-    return [] if planned_flows else receiver_ips
-
-
 def _create_private_network(
     conn: Any,
     tracker: ResourceTracker,
@@ -529,14 +520,6 @@ def _create_private_network(
     if config.resources.network_mtu is not None:
         payload["mtu"] = config.resources.network_mtu
     network = conn.network.create_network(**payload)
-    if config.resources.network_mtu is not None:
-        actual_mtu = getattr(network, "mtu", None)
-        if actual_mtu is not None and int(actual_mtu) != config.resources.network_mtu:
-            raise RuntimeError(
-                f"created network MTU {actual_mtu} does not match requested "
-                f"{config.resources.network_mtu}"
-            )
-    _tag(conn, network, metadata)
     tracker.add(
         resource_record(
             "network",
@@ -548,6 +531,14 @@ def _create_private_network(
             extra={"mtu": config.resources.network_mtu},
         )
     )
+    if config.resources.network_mtu is not None:
+        actual_mtu = getattr(network, "mtu", None)
+        if actual_mtu is not None and int(actual_mtu) != config.resources.network_mtu:
+            raise RuntimeError(
+                f"created network MTU {actual_mtu} does not match requested "
+                f"{config.resources.network_mtu}"
+            )
+    _tag(conn, network, metadata)
     return network
 
 
@@ -569,7 +560,6 @@ def _create_worker(
     controller_url: str,
     duration_seconds_value: int,
     workload_duration_seconds_value: int | None = None,
-    peers: list[str] | None = None,
     flow_assignments: list[dict[str, Any]] | None = None,
     receiver_ports: list[int] | None = None,
     planned_host: str | None = None,
@@ -581,7 +571,6 @@ def _create_worker(
         "compute": config.flavors.compute_worker,
         "network": config.flavors.network_worker,
         "storage": config.flavors.storage_worker,
-        "api": config.flavors.api_worker,
     }[plane]
     flavor_name = flavor_name_override or flavor_name
     availability_zone = _availability_zone_for_host(planned_host)
@@ -609,12 +598,14 @@ def _create_worker(
         key_name=key_name,
         user_data=worker_cloud_init(
             config=config,
+            control_token=(tracker.run_dir / "controller-token").read_text()
+            if (tracker.run_dir / "controller-token").exists()
+            else "",
             role=role,
             worker_id=worker_id,
             controller_url=controller_url,
             duration_seconds=duration_seconds_value,
             workload_duration_seconds=workload_duration_seconds_value,
-            peers=peers,
             flow_assignments=flow_assignments,
             receiver_ports=receiver_ports,
         ),
@@ -634,6 +625,7 @@ def _create_worker(
     server = conn.compute.wait_for_server(server, status="ACTIVE", failures=["ERROR"], wait=900)
     with placement_lock:
         placement.append(placement_record(worker_id, server, plane=plane, role=role))
+        atomic_write_json(tracker.run_dir / "placement.json", placement)
     return server
 
 
@@ -657,12 +649,13 @@ def _create_direct_worker_port(
         port_payload["hardware_offload_type"] = config.workloads.network.hardware_offload_type
     if config.workloads.network.port_security_enabled:
         security_group = conn.network.find_security_group(security_group_name)
-        port_payload["security_group_ids"] = [security_group.id] if security_group is not None else []
+        port_payload["security_group_ids"] = (
+            [security_group.id] if security_group is not None else []
+        )
     else:
         port_payload["port_security_enabled"] = False
         port_payload["security_group_ids"] = []
     port = conn.network.create_port(**port_payload)
-    _tag(conn, port, metadata)
     tracker.add(
         resource_record(
             "port",
@@ -678,6 +671,7 @@ def _create_direct_worker_port(
             },
         )
     )
+    _tag(conn, port, metadata)
     return port
 
 
@@ -741,6 +735,25 @@ def _create_storage_worker(
     return worker
 
 
+def _wait_for_network_receivers(
+    controller_url: str | None,
+    receiver_count: int,
+    *,
+    diagnostics_path: Path | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> None:
+    if not controller_url:
+        raise RuntimeError("A reachable controller is required for network receiver readiness")
+    if not wait_for_worker_heartbeats(
+        controller_url,
+        expected_worker_ids={f"network-receiver-{index:03d}" for index in range(receiver_count)},
+        timeout_seconds=300,
+        **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+        **({"diagnostics_path": diagnostics_path} if diagnostics_path is not None else {}),
+    ):
+        raise RuntimeError("Network receivers did not become ready before sender boot")
+
+
 def _run_boot_tasks(
     tasks: list[tuple[str, Callable[[], Any]]],
     *,
@@ -752,15 +765,16 @@ def _run_boot_tasks(
         return [task() for _, task in tasks]
     results: list[Any] = [None] * len(tasks)
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-        future_to_index = {
-            executor.submit(task): index
-            for index, (_, task) in enumerate(tasks)
-        }
+        future_to_index = {executor.submit(task): index for index, (_, task) in enumerate(tasks)}
         for future in concurrent.futures.as_completed(future_to_index):
             index = future_to_index[future]
             try:
                 results[index] = future.result()
-            except Exception as exc:
+            except BaseException as exc:
+                for pending in future_to_index:
+                    pending.cancel()
+                if isinstance(exc, (InterruptedError, KeyboardInterrupt)):
+                    raise
                 name = tasks[index][0]
                 raise RuntimeError(f"worker boot failed for {name}") from exc
     return results
@@ -798,7 +812,7 @@ def _boot_server(
 
 
 def _availability_zone_for_host(host: str | None) -> str | None:
-    if not host or host.startswith("host-"):
+    if not host:
         return None
     return f"nova:{host}"
 
@@ -806,7 +820,7 @@ def _availability_zone_for_host(host: str | None) -> str | None:
 def _plan_uses_real_host_placement(plan: SoakPlan) -> bool:
     hosts = set(plan.network.receiver_worker_hosts.values())
     hosts.update(plan.network.sender_worker_hosts.values())
-    return any(host and not host.startswith("host-") for host in hosts)
+    return bool(hosts)
 
 
 def _server_port(conn: Any, server_id: str) -> Any:

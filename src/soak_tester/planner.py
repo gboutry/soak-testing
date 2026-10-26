@@ -12,15 +12,16 @@ from soak_tester.config import SoakConfig
 
 class FlavorSpec(BaseModel):
     name: str
-    vcpus: int
-    ram_gib: float
+    vcpus: int = Field(gt=0)
+    ram_gib: float = Field(gt=0)
+    extra_specs: dict[str, str] = Field(default_factory=dict)
 
 
 class ComputePlan(BaseModel):
     target_vcpus: float
     target_ram_gib: float
     worker_count: int
-    worker_flavor: str
+    worker_flavor: str | None
     planned_vcpus: int
     planned_ram_gib: float
     worker_groups: list[dict[str, float | int | str]] = Field(default_factory=list)
@@ -31,6 +32,9 @@ class NetworkPlan(BaseModel):
     topology: str = "paired"
     host_count: int | None = None
     target_gbps: float
+    offered_load: str = "target"
+    offered_gbps: float | None = 0
+    total_streams: int = 0
     target_gbps_per_host: float | None = None
     target_gbps_per_pair: float | None = None
     selected_hosts: list[str] = Field(default_factory=list)
@@ -89,8 +93,18 @@ def create_plan(
     flavor_specs: dict[str, FlavorSpec],
     run_id: str = "planned",
 ) -> SoakPlan:
-    target_vcpus = config.targets.compute.vcpus * target_percent / 100
-    target_ram_gib = config.targets.compute.ram_gib * target_percent / 100
+    if not 0 < target_percent <= 100:
+        raise ValueError("target_percent must be in (0, 100]")
+    target_vcpus = (
+        config.targets.compute.vcpus * target_percent / 100
+        if config.workloads.compute.enabled
+        else 0
+    )
+    target_ram_gib = (
+        config.targets.compute.ram_gib * target_percent / 100
+        if config.workloads.compute.enabled
+        else 0
+    )
     compute_plan = _create_compute_plan(
         config,
         target_vcpus=target_vcpus,
@@ -98,13 +112,26 @@ def create_plan(
         flavor_specs=flavor_specs,
     )
 
+    if config.workloads.compute.enabled and compute_plan.worker_count == 0:
+        raise ValueError("Compute target cannot fit a worker of the selected flavor")
     network_plan = _create_network_plan(config, target_percent)
+    if config.workloads.network.enabled:
+        direction_count = 2 if config.workloads.network.bidirectional else 1
+        network_plan.offered_load = config.workloads.network.offered_load
+        network_plan.offered_gbps = (
+            sum(f.target_gbps for f in network_plan.flow_assignments) * direction_count
+            if network_plan.offered_load == "target"
+            else None
+        )
+        network_plan.total_streams = (
+            sum(f.parallel_streams for f in network_plan.flow_assignments) * direction_count
+        )
 
     storage_enabled = config.workloads.storage.enabled
     storage_workers = config.workloads.storage.worker_count if storage_enabled else 0
     api_target = (
         config.targets.api.ops_per_second * target_percent / 100
-        if config.workloads.api.enabled
+        if config.workloads.api.enabled and config.targets.api is not None
         else 0
     )
 
@@ -115,19 +142,21 @@ def create_plan(
         network=network_plan,
         storage=StoragePlan(
             target_read_gbps=config.targets.storage.read_gbps * target_percent / 100
-            if storage_enabled
+            if storage_enabled and config.targets.storage is not None
             else 0,
             target_write_gbps=config.targets.storage.write_gbps * target_percent / 100
-            if storage_enabled
+            if storage_enabled and config.targets.storage is not None
             else 0,
-            target_iops=config.targets.storage.iops * target_percent / 100 if storage_enabled else 0,
+            target_iops=config.targets.storage.iops * target_percent / 100
+            if storage_enabled and config.targets.storage is not None
+            else 0,
             worker_count=storage_workers,
             volume_size_gib=config.workloads.storage.volume_size_gib,
             volume_type=config.workloads.storage.volume_type,
         ),
         api=ApiPlan(
             target_ops_per_second=api_target,
-            run_from=config.workloads.api.run_from,
+            run_from="local",
             operation_mix=config.workloads.api.operation_mix,
         ),
     )
@@ -172,9 +201,9 @@ def _create_compute_plan(
             worker_flavor=compute_flavor.name,
             planned_vcpus=explicit_worker_count * compute_flavor.vcpus,
             planned_ram_gib=explicit_worker_count * compute_flavor.ram_gib,
-            worker_groups=[
-                _compute_worker_group(compute_flavor, explicit_worker_count)
-            ] if explicit_worker_count else [],
+            worker_groups=[_compute_worker_group(compute_flavor, explicit_worker_count)]
+            if explicit_worker_count
+            else [],
         )
     if len(flavor_names) == 1:
         compute_flavor = flavor_specs[flavor_names[0]]
@@ -188,9 +217,9 @@ def _create_compute_plan(
             worker_flavor=compute_flavor.name,
             planned_vcpus=compute_workers * compute_flavor.vcpus,
             planned_ram_gib=compute_workers * compute_flavor.ram_gib,
-            worker_groups=[
-                _compute_worker_group(compute_flavor, compute_workers)
-            ] if compute_workers else [],
+            worker_groups=[_compute_worker_group(compute_flavor, compute_workers)]
+            if compute_workers
+            else [],
         )
     specs = [flavor_specs[name] for name in flavor_names]
     counts = _best_compute_mix(specs, target_vcpus, target_ram_gib)
@@ -279,6 +308,7 @@ def _create_network_plan(config: SoakConfig, target_percent: float) -> NetworkPl
     flows = math.ceil(target_gbps / per_flow)
     receiver_count = math.ceil(flows / 2)
     sender_count = max(1, flows - receiver_count)
+    _check_network_budget(workload, flows, sender_count + receiver_count)
     return NetworkPlan(
         scope="aggregate",
         topology=workload.topology,
@@ -301,15 +331,15 @@ def _create_network_plan(config: SoakConfig, target_percent: float) -> NetworkPl
 
 def _create_per_host_network_plan(config: SoakConfig, target_percent: float) -> NetworkPlan:
     workload = config.workloads.network
-    host_names = workload.hosts or [
-        f"host-{index:03d}" for index in range(workload.host_count or 0)
-    ]
+    host_names = workload.hosts or []
     host_count = len(host_names)
     if host_count is None or host_count < 2:
-        raise ValueError("per-host network planning requires workloads.network.host_count >= 2")
+        raise ValueError(
+            "per-host network planning requires at least two explicit or discovered hosts"
+        )
     if workload.topology != "full_mesh":
         raise ValueError("per-host network planning requires workloads.network.topology: full_mesh")
-    per_host_capacity = config.targets.network.per_host_gbps or config.targets.network.gbps
+    per_host_capacity = config.targets.network.gbps
     target_per_host = per_host_capacity * target_percent / 100
     target_per_pair = target_per_host / (host_count - 1)
     flows_per_pair = math.ceil(target_per_pair / workload.target_gbps_per_flow)
@@ -319,10 +349,7 @@ def _create_per_host_network_plan(config: SoakConfig, target_percent: float) -> 
     receiver_count = receiver_workers_per_host * host_count
     flows = host_count * (host_count - 1) * flows_per_pair
     workers = sender_count + receiver_count
-    if flows > workload.max_flows:
-        raise ValueError(f"network plan requires {flows} flows, above max_flows={workload.max_flows}")
-    if workers > workload.max_workers:
-        raise ValueError(f"network plan requires {workers} workers, above max_workers={workload.max_workers}")
+    _check_network_budget(workload, flows, workers)
     assignments = _full_mesh_flow_assignments(
         host_names=host_names,
         sender_workers_per_host=sender_workers_per_host,
@@ -434,14 +461,26 @@ def _worker_hosts(prefix: str, host_names: list[str], workers_per_host: int) -> 
     return result
 
 
-def default_flavor_specs(config: SoakConfig) -> dict[str, FlavorSpec]:
-    names = set(config.flavors.model_dump().values())
-    names.update(config.workloads.compute.flavor_mix)
-    return {name: FlavorSpec(name=name, vcpus=1, ram_gib=1) for name in names}
-
-
 def flavor_spec_from_sdk(flavor: Any) -> FlavorSpec:
     ram_mib = getattr(flavor, "ram", None) or flavor.get("ram")
     vcpus = getattr(flavor, "vcpus", None) or flavor.get("vcpus")
     name = getattr(flavor, "name", None) or flavor.get("name")
-    return FlavorSpec(name=name, vcpus=int(vcpus), ram_gib=float(ram_mib) / 1024)
+    return FlavorSpec(
+        name=name,
+        vcpus=int(vcpus),
+        ram_gib=float(ram_mib) / 1024,
+        extra_specs=getattr(flavor, "extra_specs", None) or {},
+    )
+
+
+def _check_network_budget(workload, flows: int, workers: int) -> None:
+    if flows > workload.max_flows:
+        raise ValueError(
+            f"network plan requires {flows} flows, above max_flows={workload.max_flows}"
+        )
+    if workers > workload.max_workers:
+        raise ValueError(
+            f"network plan requires {workers} workers, above max_workers={workload.max_workers}"
+        )
+    if workload.receiver_port_base + flows - 1 > 65535:
+        raise ValueError("network flow receiver ports exceed 65535")

@@ -62,7 +62,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Set `run_id` and `project` to regexes when OpenStack/libvirt metadata exposes them. Keep defaults as `.*` for broad infrastructure views. Use `instance`, `hypervisor`, `domain`, `network_device`, `storage_device`, `ceph_pool`, and `ceph_osd` to narrow noisy panels during a run."
+        "content": "Set `run_id` and `project` to regexes when OpenStack/libvirt metadata exposes them. Keep defaults as `.*` for broad infrastructure views. Use `instance`, `hypervisor`, `domain`, `network_device`, `storage_device`, `ceph_pool`, and `ceph_osd` to narrow noisy panels during a run.\n\nInfrastructure panels use a one-minute minimum query step to match node, libvirt, Ceph and OVS collection in this deployment. Their rate windows are at least four minutes; zooming does not create finer source samples. OpenStack service metrics retain the datasource default step. The dashboard still refreshes every 30 seconds."
       }
     },
     {
@@ -821,7 +821,7 @@
       "id": 15,
       "type": "table",
       "title": "OpenStack services",
-      "description": "Exporter-dependent service/agent table. Uses `_total` agent-state metrics observed in this datasource.",
+      "description": "Service/agent liveness gauges (1 = up, 0 = down), with a fallback for exporters using the legacy _total metric names. Missing metrics do not establish service health.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -839,7 +839,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "openstack_nova_agent_state_total or openstack_neutron_agent_state_total or openstack_cinder_agent_state_total",
+          "expr": "(openstack_nova_agent_state or openstack_nova_agent_state_total) or (openstack_neutron_agent_state or openstack_neutron_agent_state_total) or (openstack_cinder_agent_state or openstack_cinder_agent_state_total)",
           "legendFormat": "{{service}} {{hostname}}",
           "range": false,
           "instant": true,
@@ -960,7 +960,7 @@
       "id": 18,
       "type": "bargauge",
       "title": "Libvirt domains by state",
-      "description": "Libvirt exporter `libvirt_domain_info_vstate` or state metric. Numeric state values are exporter/libvirt dependent.",
+      "description": "Domain count by libvirt numeric state: 0 no state, 1 running, 2 blocked, 3 paused, 4 shutdown, 5 shut off, 6 crashed, 7 suspended. Colors indicate state, not the number of domains.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -978,12 +978,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (vstate) (libvirt_domain_info_vstate{domain=~\"$domain\"}) or sum by (state) (libvirt_domain_info_state{domain=~\"$domain\"})",
-          "legendFormat": "{{vstate}}{{state}}",
+          "expr": "count_values(\"state\", libvirt_domain_info_vstate{domain=~\"$domain\"} or libvirt_domain_info_state{domain=~\"$domain\"})",
+          "legendFormat": "state {{state}}",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -993,21 +994,59 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 75
-              },
-              {
-                "color": "red",
-                "value": 90
               }
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^state 1$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^state [2347]$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^state 6$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "reduceOptions": {
@@ -1018,8 +1057,8 @@
           "fields": ""
         },
         "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "displayMode": "basic",
+        "showUnfilled": false
       }
     },
     {
@@ -1049,7 +1088,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1107,7 +1147,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1120,7 +1161,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1155,7 +1197,7 @@
       "id": 21,
       "type": "timeseries",
       "title": "Domain network RX/TX",
-      "description": "Libvirt domain interface bytes converted to bits/sec. Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput.",
+      "description": "Libvirt domain interface bytes converted to bits/sec. Host and exporter counters may include encapsulation, retransmits, and non-test traffic. Treat these panels as infrastructure-side evidence, not exact workload goodput. SR-IOV VF interface counters are not exposed by this deployment: missing VM network data does not mean zero traffic. Use physical PF counters for aggregate host traffic.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1178,7 +1220,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1191,7 +1234,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1249,7 +1293,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1262,7 +1307,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1320,7 +1366,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1333,7 +1380,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1368,7 +1416,7 @@
       "id": 24,
       "type": "timeseries",
       "title": "Domain network drops/errors",
-      "description": "Libvirt domain interface drop/error counters when available.",
+      "description": "Libvirt domain interface drop/error counters when available. SR-IOV VF interface counters are not exposed by this deployment: missing VM network data does not mean zero traffic. Use physical PF counters for aggregate host traffic.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1391,7 +1439,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1404,7 +1453,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1462,7 +1512,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "table"
+          "format": "table",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1530,7 +1581,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1588,7 +1640,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1646,7 +1699,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1659,7 +1713,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1672,7 +1727,8 @@
           "range": true,
           "instant": false,
           "refId": "C",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1730,7 +1786,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1788,7 +1845,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1846,7 +1904,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1904,7 +1963,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -1962,7 +2022,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1975,7 +2036,8 @@
           "range": false,
           "instant": true,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -1988,7 +2050,8 @@
           "range": false,
           "instant": true,
           "refId": "C",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2044,7 +2107,7 @@
       "id": 36,
       "type": "stat",
       "title": "Physical NIC RX",
-      "description": "Physical host NIC receive throughput only. Excludes bonds, bridges, VLAN devices, tunnels, tap/veth/LXC devices, and loopback to avoid counting the same packet at multiple Linux networking layers.",
+      "description": "Host NIC receive throughput. Excludes bonds, bridges, VLANs, tunnels, tap/veth/LXC devices, loopback, and SR-IOV representors/VFs ending in rN or vN, so PF traffic is not counted again through representors. Interface names are a heuristic; validate them in the per-device panel.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2062,12 +2125,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "RX",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2105,7 +2169,7 @@
       "id": 37,
       "type": "stat",
       "title": "Physical NIC TX",
-      "description": "Physical host NIC transmit throughput only. Excludes bonds, bridges, VLAN devices, tunnels, tap/veth/LXC devices, and loopback to avoid counting the same packet at multiple Linux networking layers.",
+      "description": "Host NIC transmit throughput. Excludes bonds, bridges, VLANs, tunnels, tap/veth/LXC devices, loopback, and SR-IOV representors/VFs ending in rN or vN, so PF traffic is not counted again through representors. Interface names are a heuristic; validate them in the per-device panel.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2123,12 +2187,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum(rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "TX",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2166,7 +2231,7 @@
       "id": 38,
       "type": "stat",
       "title": "VM vNIC RX+TX",
-      "description": "Guest-facing virtual NIC throughput from libvirt domain counters. This is the VM edge view and should not be added to physical NIC or OVS interface totals.",
+      "description": "Guest-facing virtual NIC throughput from libvirt domain counters. This is the VM edge view and should not be added to physical NIC or OVS interface totals. SR-IOV VF interface counters are not exposed by this deployment: missing VM network data does not mean zero traffic. Use physical PF counters for aggregate host traffic.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2189,7 +2254,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2250,7 +2316,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2288,7 +2355,7 @@
       "id": 40,
       "type": "timeseries",
       "title": "Physical NIC RX/TX by host",
-      "description": "Physical host NIC throughput by host. This is the wire-side view and intentionally excludes virtual and overlay devices.",
+      "description": "Host NIC throughput by host, excluding virtual/overlay devices and SR-IOV representors/VFs ending in rN or vN. Interface names are a heuristic; validate them in the per-device panel. Sum one direction across hosts for aggregate traffic; adding RX and TX counts traffic at both endpoints.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2306,12 +2373,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "RX {{instance}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2319,12 +2387,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "TX {{instance}}",
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2359,7 +2428,7 @@
       "id": 41,
       "type": "timeseries",
       "title": "Physical NIC RX/TX by host and device",
-      "description": "Per-physical-NIC wire throughput. Use this panel to validate whether any physical NIC approaches line rate.",
+      "description": "Per-NIC throughput excluding virtual/overlay devices and SR-IOV representors/VFs ending in rN or vN. Interface names are a heuristic; confirm the selected devices are physical ports before comparing their rates with line rate.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2377,12 +2446,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, device) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance, device) (rate(node_network_receive_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "RX {{instance}} {{device}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2390,12 +2460,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (instance, device) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\"}[$__rate_interval])) * 8",
+          "expr": "sum by (instance, device) (rate(node_network_transmit_bytes_total{instance=~\"$instance\", device=~\"en[^.]*|eth[^.]*\", device!~\".*[rv][0-9]+\"}[$__rate_interval])) * 8",
           "legendFormat": "TX {{instance}} {{device}}",
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2453,7 +2524,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2466,7 +2538,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2524,7 +2597,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2582,7 +2656,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2628,80 +2703,25 @@
     },
     {
       "id": 46,
-      "type": "timeseries",
-      "title": "OVS interface RX/TX",
-      "description": "OVS interface counters are a virtual switching breakdown. Do not sum this panel with physical NIC or VM vNIC totals; the same packet can appear on patch, tunnel, bridge, and VM-facing interfaces. Rates use clamped deltas to avoid false spikes when OVS counters drop to a lower non-zero value.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "type": "text",
+      "title": "OVS per-interface visibility",
+      "description": "Coverage notice for the currently deployed OVN exporter.",
       "gridPos": {
         "h": 6,
         "w": 12,
         "x": 0,
         "y": 77
       },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (system_id, name) (clamp_min(delta(ovs_interface_rx_bytes_total[5m]) * 8 / 300, 0) * on (system_id, uuid) group_left(name) ovs_interface)",
-          "legendFormat": "RX {{system_id}} {{name}}",
-          "range": true,
-          "instant": false,
-          "refId": "A",
-          "format": "time_series"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (system_id, name) (clamp_min(delta(ovs_interface_tx_bytes_total[5m]) * 8 / 300, 0) * on (system_id, uuid) group_left(name) ovs_interface)",
-          "legendFormat": "TX {{system_id}} {{name}}",
-          "range": true,
-          "instant": false,
-          "refId": "B",
-          "format": "time_series"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          }
-        },
-        "overrides": []
-      },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "mode": "markdown",
+        "content": "**Per-interface throughput and link state are not exported by the current OVN exporter.**\n\nThe OVS panels below show datapath or host-wide statistics, not per-interface traffic. Use the physical NIC panels for host traffic. Libvirt interface counters do not cover the SR-IOV VFs in this deployment; missing counters do not mean zero traffic."
       }
     },
     {
       "id": 47,
       "type": "timeseries",
-      "title": "OVS interface packets/sec",
-      "description": "OVS exporter packet counters joined to interface names where available.",
+      "title": "OVS datapath packets/sec",
+      "description": "Packets processed by each OVS datapath, not total SR-IOV wire traffic. Five-minute clamped gauge deltas; reset windows are clamped to zero and may under-report activity.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2719,25 +2739,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (system_id, name) (rate(ovs_interface_rx_packets_total[$__rate_interval]) * on (system_id, uuid) group_left(name) ovs_interface)",
-          "legendFormat": "RX {{system_id}} {{name}}",
+          "expr": "clamp_min(delta(ovs_vswitchd_dp_packets_total{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "{{instance}} {{datapath}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (system_id, name) (rate(ovs_interface_tx_packets_total[$__rate_interval]) * on (system_id, uuid) group_left(name) ovs_interface)",
-          "legendFormat": "TX {{system_id}} {{name}}",
-          "range": true,
-          "instant": false,
-          "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2771,8 +2779,8 @@
     {
       "id": 48,
       "type": "timeseries",
-      "title": "OVS drops/errors",
-      "description": "OVS exporter interface dropped/error counters. Metric names vary; this dashboard uses the `_total` counters found in current ovs exporter builds.",
+      "title": "OVS host-wide drops/errors",
+      "description": "Host-wide OVS interface drop/error events, not per-interface or unique packet counts. Five-minute clamped gauge deltas; reset windows may under-report activity.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2790,12 +2798,55 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (system_id, name) ((rate(ovs_interface_rx_dropped_total[$__rate_interval]) + rate(ovs_interface_tx_dropped_total[$__rate_interval]) + rate(ovs_interface_rx_errors_total[$__rate_interval]) + rate(ovs_interface_tx_errors_total[$__rate_interval])) * on (system_id, uuid) group_left(name) ovs_interface)",
-          "legendFormat": "{{system_id}} {{name}}",
+          "expr": "clamp_min(delta(ovs_vswitchd_interface_rx_dropped_total{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "RX drops {{instance}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(delta(ovs_vswitchd_interface_tx_dropped_total{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "TX drops {{instance}}",
+          "range": true,
+          "instant": false,
+          "refId": "B",
+          "format": "time_series",
+          "interval": "1m"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(delta(ovs_vswitchd_interface_rx_errors_total{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "RX errors {{instance}}",
+          "range": true,
+          "instant": false,
+          "refId": "C",
+          "format": "time_series",
+          "interval": "1m"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(delta(ovs_vswitchd_interface_tx_errors_total{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "TX errors {{instance}}",
+          "range": true,
+          "instant": false,
+          "refId": "D",
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2829,8 +2880,8 @@
     {
       "id": 49,
       "type": "bargauge",
-      "title": "OVS interface state",
-      "description": "OVS exporter interface admin/link state where available.",
+      "title": "OVS interface inventory",
+      "description": "Number of OVS interfaces reported by each host. This exporter does not provide per-interface link/admin state.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2848,12 +2899,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "ovs_interface_admin_state * on (system_id, uuid) group_left(name) ovs_interface or ovs_interface_link_state * on (system_id, uuid) group_left(name) ovs_interface",
-          "legendFormat": "{{system_id}} {{name}}",
+          "expr": "ovs_vswitchd_interfaces_total{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2863,16 +2915,8 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "orange",
-                "value": 75
-              },
-              {
-                "color": "red",
-                "value": 90
               }
             ]
           }
@@ -2888,15 +2932,15 @@
           "fields": ""
         },
         "orientation": "horizontal",
-        "displayMode": "gradient",
+        "displayMode": "basic",
         "showUnfilled": true
       }
     },
     {
       "id": 50,
       "type": "timeseries",
-      "title": "OVS datapath flows/lookups",
-      "description": "OVS exporter datapath flow count and lookup hit/miss/lost counters.",
+      "title": "OVS datapath flows and lookups",
+      "description": "Current datapath flow count on the left axis; lookup events/sec on the right. Lookups use five-minute clamped gauge deltas; reset windows may under-report. Hardware-offloaded traffic is not fully represented by kernel datapath counters.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2914,12 +2958,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "ovs_dp_flows",
-          "legendFormat": "flows {{system_id}} {{datapath}}",
+          "expr": "ovs_vswitchd_dp_flows_total{instance=~\"$instance\"}",
+          "legendFormat": "flows {{instance}} {{datapath}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2927,12 +2972,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(ovs_dp_lookups_hit_total[$__rate_interval])",
-          "legendFormat": "hit {{system_id}} {{datapath}}",
+          "expr": "clamp_min(delta(ovs_vswitchd_dp_flows_lookup_hit{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "hit /s {{instance}} {{datapath}}",
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2940,12 +2986,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(ovs_dp_lookups_missed_total[$__rate_interval])",
-          "legendFormat": "miss {{system_id}} {{datapath}}",
+          "expr": "clamp_min(delta(ovs_vswitchd_dp_flows_lookup_missed{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "missed /s {{instance}} {{datapath}}",
           "range": true,
           "instant": false,
           "refId": "C",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -2953,12 +3000,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "rate(ovs_dp_lookups_lost_total[$__rate_interval])",
-          "legendFormat": "lost {{system_id}} {{datapath}}",
+          "expr": "clamp_min(delta(ovs_vswitchd_dp_flows_lookup_lost{instance=~\"$instance\"}[5m]) / 300, 0)",
+          "legendFormat": "lost /s {{instance}} {{datapath}}",
           "range": true,
           "instant": false,
           "refId": "D",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -2973,7 +3021,28 @@
             "spanNulls": false
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(hit|missed|lost) /s "
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "lookups/s"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -3029,7 +3098,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3087,7 +3157,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3145,7 +3216,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3158,7 +3230,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3216,7 +3289,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3229,7 +3303,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3287,7 +3362,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3345,7 +3421,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3416,7 +3493,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3485,7 +3563,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3546,7 +3625,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3584,7 +3664,7 @@
       "id": 62,
       "type": "stat",
       "title": "OSDs down/out",
-      "description": "Ceph OSDs down or out from boolean comparisons.",
+      "description": "Number of OSDs down or out. Each OSD contributes at most one, including when it is both down and out.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -3602,12 +3682,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(ceph_osd_up == bool 0) + sum(ceph_osd_in == bool 0)",
-          "legendFormat": "down+out",
+          "expr": "sum(((ceph_osd_up == bool 0) + (ceph_osd_in == bool 0)) > bool 0)",
+          "legendFormat": "down or out",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3672,7 +3753,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3737,7 +3819,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3802,7 +3885,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3815,7 +3899,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3828,7 +3913,8 @@
           "range": true,
           "instant": false,
           "refId": "C",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3841,7 +3927,8 @@
           "range": true,
           "instant": false,
           "refId": "D",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3854,7 +3941,8 @@
           "range": true,
           "instant": false,
           "refId": "E",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3867,7 +3955,8 @@
           "range": true,
           "instant": false,
           "refId": "F",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3880,7 +3969,8 @@
           "range": true,
           "instant": false,
           "refId": "G",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -3938,7 +4028,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3951,7 +4042,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -3964,7 +4056,8 @@
           "range": true,
           "instant": false,
           "refId": "C",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4022,7 +4115,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "table"
+          "format": "table",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4090,7 +4184,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4151,7 +4246,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4212,7 +4308,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4273,7 +4370,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4311,7 +4409,7 @@
       "id": 73,
       "type": "timeseries",
       "title": "Pool read/write throughput",
-      "description": "Ceph pool throughput by pool name when `ceph_pool_metadata` is available.",
+      "description": "Ceph pool throughput by pool name when `ceph_pool_metadata` is available. Supports both _total and unsuffixed Ceph counters.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4329,12 +4427,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name) (rate(ceph_pool_rd_bytes_total[$__rate_interval]) * on (pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
+          "expr": "sum by (name) ((rate(ceph_pool_rd_bytes_total[$__rate_interval]) or rate(ceph_pool_rd_bytes[$__rate_interval])) * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
           "legendFormat": "read {{name}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -4342,12 +4441,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name) (rate(ceph_pool_wr_bytes_total[$__rate_interval]) * on (pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
+          "expr": "sum by (name) ((rate(ceph_pool_wr_bytes_total[$__rate_interval]) or rate(ceph_pool_wr_bytes[$__rate_interval])) * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
           "legendFormat": "write {{name}}",
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4382,7 +4482,7 @@
       "id": 74,
       "type": "timeseries",
       "title": "Pool IOPS",
-      "description": "Ceph pool read/write operations/sec by pool name.",
+      "description": "Ceph pool read/write operations/sec by pool name. Supports both _total and unsuffixed Ceph counters.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4400,12 +4500,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name) (rate(ceph_pool_rd_total[$__rate_interval]) * on (pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
+          "expr": "sum by (name) ((rate(ceph_pool_rd_total[$__rate_interval]) or rate(ceph_pool_rd[$__rate_interval])) * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
           "legendFormat": "read {{name}}",
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -4413,12 +4514,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name) (rate(ceph_pool_wr_total[$__rate_interval]) * on (pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
+          "expr": "sum by (name) ((rate(ceph_pool_wr_total[$__rate_interval]) or rate(ceph_pool_wr[$__rate_interval])) * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
           "legendFormat": "write {{name}}",
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4476,7 +4578,8 @@
           "range": true,
           "instant": false,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -4489,7 +4592,8 @@
           "range": true,
           "instant": false,
           "refId": "B",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4524,7 +4628,7 @@
       "id": 76,
       "type": "bargauge",
       "title": "Pool capacity used",
-      "description": "Ceph pool percent used by pool name.",
+      "description": "Ceph pool capacity used as a 0-100 percentage. The exported pool fraction is multiplied by 100.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4542,12 +4646,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name) (ceph_pool_percent_used * on(pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
+          "expr": "100 * sum by (name) (ceph_pool_percent_used * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~\"$ceph_pool\"})",
           "legendFormat": "{{name}}",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4613,7 +4718,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -4794,7 +4900,7 @@
       "id": 80,
       "type": "timeseries",
       "title": "Agent/service state",
-      "description": "OpenStack exporter Nova, Neutron, and Cinder agent-state metrics. Metric labels vary across exporter versions.",
+      "description": "Service/agent liveness gauges (1 = up, 0 = down), with a fallback for exporters using the legacy _total metric names. Missing metrics do not establish service health.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -4812,7 +4918,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "openstack_nova_agent_state_total",
+          "expr": "(openstack_nova_agent_state or openstack_nova_agent_state_total)",
           "legendFormat": "nova {{hostname}} {{service}}",
           "range": true,
           "instant": false,
@@ -4825,7 +4931,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "openstack_neutron_agent_state_total",
+          "expr": "(openstack_neutron_agent_state or openstack_neutron_agent_state_total)",
           "legendFormat": "neutron {{host}} {{agent_type}}",
           "range": true,
           "instant": false,
@@ -4838,7 +4944,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "openstack_cinder_agent_state_total",
+          "expr": "(openstack_cinder_agent_state or openstack_cinder_agent_state_total)",
           "legendFormat": "cinder {{hostname}} {{binary}}",
           "range": true,
           "instant": false,
@@ -4877,15 +4983,15 @@
     {
       "id": 81,
       "type": "timeseries",
-      "title": "Hypervisor allocation",
-      "description": "OpenStack exporter Nova hypervisor vCPU/RAM/local disk allocation metrics.",
+      "title": "Hypervisor allocated vCPUs",
+      "description": "Allocated virtual CPUs reported by Nova; a count, not CPU utilization.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 139
       },
@@ -4902,7 +5008,52 @@
           "instant": false,
           "refId": "A",
           "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 92,
+      "type": "timeseries",
+      "title": "Hypervisor allocated memory",
+      "description": "Memory allocation reported by Nova, in bytes; this is not guest application memory usage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 139
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -4913,9 +5064,54 @@
           "legendFormat": "memory used {{hostname}}",
           "range": true,
           "instant": false,
-          "refId": "B",
+          "refId": "A",
           "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 93,
+      "type": "timeseries",
+      "title": "Hypervisor allocated local disk",
+      "description": "Allocated local disk capacity reported by Nova, in bytes; this is not guest filesystem usage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 139
+      },
+      "targets": [
         {
           "datasource": {
             "type": "prometheus",
@@ -4926,13 +5122,13 @@
           "legendFormat": "local disk used {{hostname}}",
           "range": true,
           "instant": false,
-          "refId": "C",
+          "refId": "A",
           "format": "time_series"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "bytes",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -4969,9 +5165,9 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 12,
-        "x": 12,
-        "y": 139
+        "w": 24,
+        "x": 0,
+        "y": 145
       },
       "targets": [
         {
@@ -5063,7 +5259,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 151
       },
       "collapsed": false,
       "panels": []
@@ -5081,7 +5277,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5095,7 +5291,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5146,7 +5343,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5160,7 +5357,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5211,7 +5409,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5225,7 +5423,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5276,7 +5475,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5290,7 +5489,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5332,7 +5532,7 @@
       "id": 88,
       "type": "stat",
       "title": "Ceph OSDs down/out",
-      "description": "Ceph OSD risk count from up/in metrics.",
+      "description": "Number of OSDs down or out. Each OSD contributes at most one, including when it is both down and out.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -5341,7 +5541,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5350,12 +5550,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(ceph_osd_up == bool 0) + sum(ceph_osd_in == bool 0)",
-          "legendFormat": "osds",
+          "expr": "sum(((ceph_osd_up == bool 0) + (ceph_osd_in == bool 0)) > bool 0)",
+          "legendFormat": "down or out",
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5406,7 +5607,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 146
+        "y": 152
       },
       "targets": [
         {
@@ -5420,7 +5621,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "time_series"
+          "format": "time_series",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5462,7 +5664,7 @@
       "id": 90,
       "type": "table",
       "title": "Top noisy VMs/domains",
-      "description": "Top libvirt domains by CPU, network, and storage activity. Joined to metadata where available.",
+      "description": "Top libvirt domains by CPU, network, and storage activity. Joined to metadata where available. SR-IOV VF interface counters are not exposed by this deployment: missing VM network data does not mean zero traffic. Use physical PF counters for aggregate host traffic.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -5471,7 +5673,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 150
+        "y": 156
       },
       "targets": [
         {
@@ -5485,7 +5687,8 @@
           "range": false,
           "instant": true,
           "refId": "A",
-          "format": "table"
+          "format": "table",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -5498,7 +5701,8 @@
           "range": false,
           "instant": true,
           "refId": "B",
-          "format": "table"
+          "format": "table",
+          "interval": "1m"
         },
         {
           "datasource": {
@@ -5511,7 +5715,8 @@
           "range": false,
           "instant": true,
           "refId": "C",
-          "format": "table"
+          "format": "table",
+          "interval": "1m"
         }
       ],
       "fieldConfig": {
@@ -5543,7 +5748,7 @@
       "id": 91,
       "type": "table",
       "title": "OpenStack services down",
-      "description": "Exporter-dependent table of down OpenStack services/agents. Uses agent-state metrics where available.",
+      "description": "Service/agent liveness gauges (1 = up, 0 = down), with a fallback for exporters using the legacy _total metric names. Missing metrics do not establish service health.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -5552,7 +5757,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 150
+        "y": 156
       },
       "targets": [
         {
@@ -5561,7 +5766,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(openstack_nova_agent_state_total == 0) or (openstack_neutron_agent_state_total == 0) or (openstack_cinder_agent_state_total == 0)",
+          "expr": "((openstack_nova_agent_state or openstack_nova_agent_state_total) == 0) or ((openstack_neutron_agent_state or openstack_neutron_agent_state_total) == 0) or ((openstack_cinder_agent_state or openstack_cinder_agent_state_total) == 0)",
           "legendFormat": "",
           "range": false,
           "instant": true,
@@ -5745,13 +5950,13 @@
         "name": "instance",
         "type": "query",
         "label": "Node instance",
-        "description": "Node exporter instance label values.",
+        "description": "Node exporter instance labels from one host-information series per node.",
         "datasource": {
           "type": "prometheus",
           "uid": "${datasource}"
         },
         "query": {
-          "query": "label_values(node_cpu_seconds_total, instance)",
+          "query": "label_values(node_uname_info, instance)",
           "refId": "StandardVariableQuery"
         },
         "regex": "",

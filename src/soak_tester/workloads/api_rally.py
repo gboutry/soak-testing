@@ -35,9 +35,9 @@ class RallyApiSummary:
     total_ops_per_second: float = 0.0
     success_ops_per_second: float = 0.0
     error_rate: float = 0.0
-    latency_p50_ms: float = 0.0
-    latency_p95_ms: float = 0.0
-    latency_p99_ms: float = 0.0
+    latency_p50_ms: float | None = None
+    latency_p95_ms: float | None = None
+    latency_p99_ms: float | None = None
     scenarios: dict[str, RallyScenarioSummary] = field(default_factory=dict)
     atomic_actions: dict[str, RallyScenarioSummary] = field(default_factory=dict)
 
@@ -55,9 +55,6 @@ def render_rally_task(
     *,
     duration_seconds: int,
     concurrency: int,
-    times: int | None = None,
-    volume_size_gib: int = 1,
-    include_create_delete: bool = True,
     error_rate_max: float = 0.0,
     scenario_names: list[str] | None = None,
 ) -> str:
@@ -69,16 +66,13 @@ def render_rally_task(
         "CinderVolumes.list_volumes",
     ]
     runner: dict[str, Any]
-    if duration_seconds > 0:
-        runner = {
-            "type": "constant_for_duration",
-            "duration": duration_seconds,
-            "concurrency": concurrency,
-        }
-    elif times:
-        runner = {"type": "constant", "times": times, "concurrency": concurrency}
-    else:
-        runner = {"type": "constant", "times": concurrency, "concurrency": concurrency}
+    if duration_seconds <= 0:
+        raise ValueError("Rally duration must be positive")
+    runner = {
+        "type": "constant_for_duration",
+        "duration": duration_seconds,
+        "concurrency": concurrency,
+    }
     common = {
         "runner": runner,
         "sla": {"failure_rate": {"max": error_rate_max}},
@@ -94,7 +88,9 @@ def render_rally_task(
     return yaml.safe_dump(scenarios, sort_keys=False)
 
 
-def parse_rally_results(payload: str | list[dict[str, Any]] | dict[str, Any], *, elapsed_seconds: float) -> RallyApiSummary:
+def parse_rally_results(
+    payload: str | list[dict[str, Any]] | dict[str, Any], *, elapsed_seconds: float
+) -> RallyApiSummary:
     data = json.loads(payload) if isinstance(payload, str) else payload
     if isinstance(data, dict) and "tasks" in data:
         return _parse_rally_report(data, elapsed_seconds=elapsed_seconds)
@@ -163,9 +159,6 @@ def run_rally_api_workload(
     auth: dict[str, Any],
     duration_seconds: int,
     concurrency: int,
-    times: int | None,
-    volume_size_gib: int,
-    include_create_delete: bool,
     error_rate_max: float,
     mode: str = "saturation",
     metric_writer: MetricWriter,
@@ -174,20 +167,9 @@ def run_rally_api_workload(
 ) -> RallyApiSummary:
     require_rally()
     rally_dir = ensure_dir(run_dir / "api-rally")
-    task_path = rally_dir / "task.yaml"
     deployment_path = rally_dir / "deployment.json"
     results_path = rally_dir / "results.json"
     summary_path = rally_dir / "summary.json"
-    log_path = rally_dir / "rally.log"
-    task_payload = render_rally_task(
-        duration_seconds=duration_seconds,
-        concurrency=concurrency,
-        times=times,
-        volume_size_gib=volume_size_gib,
-        include_create_delete=include_create_delete,
-        error_rate_max=error_rate_max,
-    )
-    task_path.write_text(task_payload, encoding="utf-8")
     deployment_name = f"soak-tester-{run_dir.name}"
     deployment_path.write_text(_deployment_json(auth, redact=True), encoding="utf-8")
     deployment_path.chmod(0o600)
@@ -195,77 +177,52 @@ def run_rally_api_workload(
     env = _rally_env(auth)
     start = time.monotonic()
     task_returncode = 0
-    try:
-        if mode == "saturation":
-            result_paths, task_returncode = _run_saturation_tasks(
-                command_runner=command_runner,
-                rally_dir=rally_dir,
-                deployment_name=deployment_name,
-                env=env,
-                duration_seconds=duration_seconds,
-                concurrency=concurrency,
-                times=times,
-                volume_size_gib=volume_size_gib,
-                include_create_delete=include_create_delete,
-                error_rate_max=error_rate_max,
-            )
-            _combine_rally_reports(result_paths, results_path)
-        else:
-            with log_path.open("a", encoding="utf-8") as log:
-                _run_rally_command(
-                    command_runner,
-                    [
-                        "rally",
-                        "deployment",
-                        "create",
-                        "--fromenv",
-                        "--name",
-                        deployment_name,
-                    ],
-                    env=env,
-                    log=log,
-                )
-                completed = command_runner(
-                    ["rally", "task", "start", "--deployment", deployment_name, "--task", str(task_path)],
-                    check=False,
-                    env=env,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                )
-                task_returncode = int(getattr(completed, "returncode", 0) or 0)
-                task_uuid = _latest_rally_task_uuid(command_runner, deployment_name, env=env)
-                command_runner(
-                    ["rally", "task", "report", "--uuid", task_uuid, "--json", "--out", str(results_path)],
-                    check=False,
-                    env=env,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                )
-    finally:
-        if mode != "saturation":
-            with log_path.open("a", encoding="utf-8") as log:
-                command_runner(
-                    ["rally", "deployment", "destroy", "--deployment", deployment_name],
-                    check=False,
-                    env=env,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                )
+    if mode == "saturation":
+        result_paths, task_returncode = _run_saturation_tasks(
+            command_runner=command_runner,
+            rally_dir=rally_dir,
+            deployment_name=deployment_name,
+            env=env,
+            duration_seconds=duration_seconds,
+            concurrency=concurrency,
+            error_rate_max=error_rate_max,
+        )
+        _combine_rally_reports(result_paths, results_path)
+    else:
+        path, task_returncode = _run_saturation_scenario(
+            command_runner=command_runner,
+            rally_dir=rally_dir,
+            deployment_name=deployment_name,
+            env=env,
+            scenario=None,
+            duration_seconds=duration_seconds,
+            concurrency=concurrency,
+            error_rate_max=error_rate_max,
+        )
+        _combine_rally_reports([path], results_path)
     elapsed = time.monotonic() - start
     if not results_path.exists():
-        raise RuntimeError(f"Rally task failed with return code {task_returncode}; no results were exported")
+        raise RuntimeError(
+            f"Rally task failed with return code {task_returncode}; no results were exported"
+        )
     result_payload = results_path.read_text(encoding="utf-8")
     summary = parse_rally_results(result_payload, elapsed_seconds=elapsed)
-    if mode == "saturation" and summary.total_attempts == 0:
-        raise RuntimeError("Rally saturation mode produced no API iterations")
-    summary_path.write_text(json.dumps(_summary_to_dict(summary), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if summary.total_attempts == 0:
+        raise RuntimeError(f"Rally {mode} mode produced no API iterations")
+    summary_path.write_text(
+        json.dumps(_summary_to_dict(summary), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     write_rally_metrics(summary, metric_writer)
     event_writer.write(
         level="info",
         plane="api",
-        event="rally_completed",
-        details=_summary_to_dict(summary),
+        event="rally_completed" if task_returncode == 0 else "rally_failed",
+        details={**_summary_to_dict(summary), "returncode": task_returncode},
     )
+    if task_returncode != 0:
+        raise RuntimeError(
+            f"Rally task failed with return code {task_returncode}; exported results retained"
+        )
     return summary
 
 
@@ -277,9 +234,6 @@ def _run_saturation_tasks(
     env: dict[str, str],
     duration_seconds: int,
     concurrency: int,
-    times: int | None,
-    volume_size_gib: int,
-    include_create_delete: bool,
     error_rate_max: float,
 ) -> tuple[list[Path], int]:
     scenarios = [
@@ -302,9 +256,6 @@ def _run_saturation_tasks(
                 scenario=scenario,
                 duration_seconds=duration_seconds,
                 concurrency=concurrency,
-                times=times,
-                volume_size_gib=volume_size_gib,
-                include_create_delete=include_create_delete,
                 error_rate_max=error_rate_max,
             )
             for scenario in scenarios
@@ -313,7 +264,7 @@ def _run_saturation_tasks(
             result_path, returncode = future.result()
             result_paths.append(result_path)
             returncodes.append(returncode)
-    return sorted(result_paths), max(returncodes, default=0)
+    return sorted(result_paths), next((code for code in returncodes if code), 0)
 
 
 def _run_saturation_scenario(
@@ -322,15 +273,12 @@ def _run_saturation_scenario(
     rally_dir: Path,
     deployment_name: str,
     env: dict[str, str],
-    scenario: str,
+    scenario: str | None,
     duration_seconds: int,
     concurrency: int,
-    times: int | None,
-    volume_size_gib: int,
-    include_create_delete: bool,
     error_rate_max: float,
 ) -> tuple[Path, int]:
-    slug = _slug(scenario)
+    slug = _slug(scenario) if scenario else "single-task"
     task_path = rally_dir / f"task-{slug}.yaml"
     log_path = rally_dir / f"rally-{slug}.log"
     results_path = rally_dir / f"results-{slug}.json"
@@ -345,11 +293,8 @@ def _run_saturation_scenario(
         render_rally_task(
             duration_seconds=duration_seconds,
             concurrency=concurrency,
-            times=times,
-            volume_size_gib=volume_size_gib,
-            include_create_delete=include_create_delete,
             error_rate_max=error_rate_max,
-            scenario_names=[scenario],
+            scenario_names=[scenario] if scenario else None,
         ),
         encoding="utf-8",
     )
@@ -375,58 +320,60 @@ def _run_saturation_scenario(
             env=env,
             log=log,
         )
-        completed = command_runner(
-            [
-                "rally",
-                "--config-file",
-                str(config_path),
-                "task",
-                "start",
-                "--deployment",
-                deployment_name,
-                "--task",
-                str(task_path),
-            ],
-            check=False,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        returncode = int(getattr(completed, "returncode", 0) or 0)
-        task_uuid = _task_uuid_from_log(log_path)
-        command_runner(
-            [
-                "rally",
-                "--config-file",
-                str(config_path),
-                "task",
-                "report",
-                "--uuid",
-                task_uuid,
-                "--json",
-                "--out",
-                str(results_path),
-            ],
-            check=False,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-        command_runner(
-            [
-                "rally",
-                "--config-file",
-                str(config_path),
-                "deployment",
-                "destroy",
-                "--deployment",
-                deployment_name,
-            ],
-            check=False,
-            env=env,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+        try:
+            completed = command_runner(
+                [
+                    "rally",
+                    "--config-file",
+                    str(config_path),
+                    "task",
+                    "start",
+                    "--deployment",
+                    deployment_name,
+                    "--task",
+                    str(task_path),
+                ],
+                check=False,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            returncode = int(getattr(completed, "returncode", 0) or 0)
+            task_uuid = _task_uuid_from_log(log_path)
+            command_runner(
+                [
+                    "rally",
+                    "--config-file",
+                    str(config_path),
+                    "task",
+                    "report",
+                    "--uuid",
+                    task_uuid,
+                    "--json",
+                    "--out",
+                    str(results_path),
+                ],
+                check=False,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        finally:
+            command_runner(
+                [
+                    "rally",
+                    "--config-file",
+                    str(config_path),
+                    "deployment",
+                    "destroy",
+                    "--deployment",
+                    deployment_name,
+                ],
+                check=False,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
     return results_path, returncode
 
 
@@ -455,7 +402,6 @@ def _slug(value: str) -> str:
 
 def _parse_rally_report(data: dict[str, Any], *, elapsed_seconds: float) -> RallyApiSummary:
     summary = RallyApiSummary()
-    scenario_latencies: list[float] = []
     for task in data.get("tasks", []):
         for subtask in task.get("subtasks", []):
             for workload in subtask.get("workloads", []):
@@ -463,7 +409,9 @@ def _parse_rally_report(data: dict[str, Any], *, elapsed_seconds: float) -> Rall
                 attempts = int(workload.get("total_iteration_count") or 0)
                 errors = int(workload.get("failed_iteration_count") or 0)
                 successes = max(0, attempts - errors)
-                total_stats = ((workload.get("statistics") or {}).get("durations") or {}).get("total") or {}
+                total_stats = ((workload.get("statistics") or {}).get("durations") or {}).get(
+                    "total"
+                ) or {}
                 total_data = total_stats.get("data") or {}
                 scenario = RallyScenarioSummary(
                     attempts=attempts,
@@ -471,15 +419,16 @@ def _parse_rally_report(data: dict[str, Any], *, elapsed_seconds: float) -> Rall
                     errors=errors,
                     latency_p50_ms=float(total_data.get("median") or 0) * 1000,
                     latency_p95_ms=float(total_data.get("95%ile") or 0) * 1000,
-                    latency_p99_ms=float(total_data.get("99%ile") or total_data.get("max") or 0) * 1000,
+                    latency_p99_ms=float(total_data.get("99%ile") or total_data.get("max") or 0)
+                    * 1000,
                 )
                 summary.scenarios[scenario_name] = scenario
                 summary.total_attempts += attempts
                 summary.successes += successes
                 summary.errors += errors
-                if scenario.latency_p50_ms:
-                    scenario_latencies.append(scenario.latency_p50_ms)
-                for atomic in (((workload.get("statistics") or {}).get("durations") or {}).get("atomics") or []):
+                for atomic in ((workload.get("statistics") or {}).get("durations") or {}).get(
+                    "atomics"
+                ) or []:
                     atomic_name = str(atomic.get("name") or atomic.get("display_name") or "unknown")
                     atomic_data = atomic.get("data") or {}
                     summary.atomic_actions[atomic_name] = RallyScenarioSummary(
@@ -488,16 +437,17 @@ def _parse_rally_report(data: dict[str, Any], *, elapsed_seconds: float) -> Rall
                         errors=errors,
                         latency_p50_ms=float(atomic_data.get("median") or 0) * 1000,
                         latency_p95_ms=float(atomic_data.get("95%ile") or 0) * 1000,
-                        latency_p99_ms=float(atomic_data.get("99%ile") or atomic_data.get("max") or 0) * 1000,
+                        latency_p99_ms=float(
+                            atomic_data.get("99%ile") or atomic_data.get("max") or 0
+                        )
+                        * 1000,
                     )
     elapsed = max(elapsed_seconds, 0.001)
     summary.total_ops_per_second = summary.total_attempts / elapsed
     summary.success_ops_per_second = summary.successes / elapsed
     summary.error_rate = summary.errors / max(summary.total_attempts, 1)
-    scenario_items = list(summary.scenarios.values())
-    summary.latency_p50_ms = percentile([item.latency_p50_ms for item in scenario_items], 50)
-    summary.latency_p95_ms = percentile([item.latency_p95_ms for item in scenario_items], 95)
-    summary.latency_p99_ms = percentile([item.latency_p99_ms for item in scenario_items], 99)
+    # Aggregated scenario quantiles cannot reconstruct a pooled latency quantile.
+    # Preserve each scenario's distribution instead of taking quantiles of quantiles.
     return summary
 
 
@@ -513,9 +463,12 @@ def write_rally_metrics(summary: RallyApiSummary, writer: MetricWriter) -> None:
     _metric(writer, "api.rally.success_ops_per_second", summary.success_ops_per_second, "ops/s")
     _metric(writer, "api.rally.errors", summary.errors, "count")
     _metric(writer, "api.rally.error_rate", summary.error_rate, "ratio")
-    _metric(writer, "api.rally.latency_p50_ms", summary.latency_p50_ms, "ms")
-    _metric(writer, "api.rally.latency_p95_ms", summary.latency_p95_ms, "ms")
-    _metric(writer, "api.rally.latency_p99_ms", summary.latency_p99_ms, "ms")
+    if summary.latency_p50_ms is not None:
+        _metric(writer, "api.rally.latency_p50_ms", summary.latency_p50_ms, "ms")
+    if summary.latency_p95_ms is not None:
+        _metric(writer, "api.rally.latency_p95_ms", summary.latency_p95_ms, "ms")
+    if summary.latency_p99_ms is not None:
+        _metric(writer, "api.rally.latency_p99_ms", summary.latency_p99_ms, "ms")
     for scenario, item in sorted(summary.scenarios.items()):
         tags = {"scenario": scenario}
         _metric(writer, "api.rally.scenario.success_ops", item.successes, "count", tags)
@@ -530,7 +483,9 @@ def percentile(values: list[float], pct: int) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, int(__import__("math").ceil((pct / 100) * len(ordered))) - 1))
+    index = max(
+        0, min(len(ordered) - 1, int(__import__("math").ceil((pct / 100) * len(ordered))) - 1)
+    )
     return float(ordered[index])
 
 
@@ -551,7 +506,9 @@ def _metric(
     )
 
 
-def _run_rally_command(command_runner: Any, cmd: list[str], *, env: dict[str, str], log: Any) -> None:
+def _run_rally_command(
+    command_runner: Any, cmd: list[str], *, env: dict[str, str], log: Any
+) -> None:
     command_runner(
         cmd,
         check=True,
@@ -559,21 +516,6 @@ def _run_rally_command(command_runner: Any, cmd: list[str], *, env: dict[str, st
         stdout=log,
         stderr=subprocess.STDOUT,
     )
-
-
-def _latest_rally_task_uuid(command_runner: Any, deployment_name: str, *, env: dict[str, str]) -> str:
-    completed = command_runner(
-        ["rally", "task", "list", "--deployment", deployment_name, "--uuids-only"],
-        check=True,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    task_ids = [line.strip() for line in str(completed.stdout).splitlines() if line.strip()]
-    if not task_ids:
-        raise RuntimeError(f"Rally did not report a task UUID for deployment {deployment_name}")
-    return task_ids[-1]
 
 
 def _scenario_name(scenario: dict[str, Any]) -> str:
@@ -584,7 +526,13 @@ def _scenario_name(scenario: dict[str, Any]) -> str:
 
 
 def _rally_env(auth: dict[str, Any]) -> dict[str, str]:
-    env = dict(os.environ)
+    # Inherited tokens or OS_CLOUD must not override the run-scoped credentials.
+    tls_keys = {"OS_CACERT", "OS_CERT", "OS_KEY", "OS_INSECURE"}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("OS_") or key in tls_keys
+    }
     env.update(
         {
             "OS_AUTH_URL": str(auth["auth_url"]),
@@ -622,6 +570,10 @@ def _deployment_json(auth: dict[str, Any], *, redact: bool = False) -> str:
 
 def _summary_to_dict(summary: RallyApiSummary) -> dict[str, Any]:
     return {
+        "rate_basis": "attempts divided by runner wall time, including local Rally setup and teardown",
+        "latency_basis": "pooled iterations"
+        if summary.latency_p95_ms is not None
+        else "global quantiles unavailable from aggregated reports; see per-scenario values",
         "total_attempts": summary.total_attempts,
         "successes": summary.successes,
         "errors": summary.errors,

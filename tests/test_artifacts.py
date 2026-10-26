@@ -194,8 +194,18 @@ def test_domain_summary_markdown_includes_all_planes(tmp_path):
     metrics = [
         {"metric": "guest.cpu_percent", "worker_id": "compute-000", "value": 99},
         {"metric": "guest.memory_used_percent", "worker_id": "compute-000", "value": 70},
-        {"metric": "iperf.goodput_bps", "worker_id": "network-sender-000", "value": 2_000_000_000, "tags": {"flow_id": "flow-1"}},
-        {"metric": "iperf.retransmits", "worker_id": "network-sender-000", "value": 3, "tags": {"flow_id": "flow-1"}},
+        {
+            "metric": "iperf.goodput_bps",
+            "worker_id": "network-sender-000",
+            "value": 2_000_000_000,
+            "tags": {"flow_id": "flow-1"},
+        },
+        {
+            "metric": "iperf.retransmits",
+            "worker_id": "network-sender-000",
+            "value": 3,
+            "tags": {"flow_id": "flow-1"},
+        },
         {"metric": "fio.read_bps", "worker_id": "storage-000", "value": 1_000_000_000},
         {"metric": "fio.write_iops", "worker_id": "storage-000", "value": 5000},
     ]

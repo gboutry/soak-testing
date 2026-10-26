@@ -15,9 +15,14 @@ class PrometheusClient:
         self.session = requests.Session()
         if config.auth.type == "bearer" and config.auth.token_file:
             token = open(config.auth.token_file, encoding="utf-8").read().strip()
+            if not token:
+                raise ValueError("Prometheus bearer token is empty")
             self.session.headers["authorization"] = f"Bearer {token}"
         elif config.auth.type == "basic" and config.auth.username and config.auth.password_env:
-            self.session.auth = (config.auth.username, os.environ.get(config.auth.password_env, ""))
+            password = os.environ.get(config.auth.password_env)
+            if not password:
+                raise ValueError("Prometheus password environment variable is empty or missing")
+            self.session.auth = (config.auth.username, password)
 
     @property
     def verify(self) -> bool | str:

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from soak_tester.planner import read_plan
+from soak_tester.evidence import assess_run, window_metrics, timestamp
 from soak_tester.state import load_state
 from soak_tester.util import atomic_write_json, read_json
 
@@ -14,6 +15,14 @@ def generate_final_report(run_dir: Path) -> dict[str, Any]:
     plan = read_plan(run_dir / "plan.yaml")
     resources = read_json(run_dir / "resources.json", {"resources": []})
     metrics = _read_jsonl(run_dir / "metrics.jsonl")
+    events = _read_jsonl(run_dir / "events.jsonl")
+    evidence = assess_run(run_dir)
+    eligible = window_metrics(
+        metrics,
+        timestamp(state.timeline.steady_state_started_at),
+        timestamp(state.timeline.steady_state_ended_at),
+    )
+    cleanup = read_json(run_dir / "cleanup.json", {})
     observability = read_json(
         run_dir / "observability" / "prometheus-summary.json",
         default=None,
@@ -27,12 +36,18 @@ def generate_final_report(run_dir: Path) -> dict[str, Any]:
             "network_gbps": plan.network.target_gbps,
             "storage_read_gbps": plan.storage.target_read_gbps,
             "storage_write_gbps": plan.storage.target_write_gbps,
+            "storage_iops": plan.storage.target_iops,
             "api_ops_per_second": plan.api.target_ops_per_second,
         },
         "planned_resources": plan.model_dump(mode="json"),
         "created_resources": resources.get("resources", []),
-        "active_resources": len(resources.get("resources", [])),
-        "achieved": _summarize_metrics(metrics),
+        "active_resources": sum(len(v) for v in (cleanup.get("remaining") or {}).values())
+        if cleanup.get("status") == "passed"
+        else None,
+        "achieved": _summarize_metrics(eligible),
+        "evidence": evidence,
+        "workload_success": evidence["workload_success"],
+        "measurement_validity": evidence["measurement_validity"],
         "worker_failures": _count_events(run_dir, "worker_failed"),
         "worker_replacements": _count_events(run_dir, "worker_replaced"),
         "steady_state_window": {
@@ -40,11 +55,34 @@ def generate_final_report(run_dir: Path) -> dict[str, Any]:
             "ended_at": state.timeline.steady_state_ended_at,
         },
         "observability": observability,
-        "cleanup_status": state.status if "cleanup" in state.status else None,
+        "repeatability": {
+            "runner": read_json(run_dir / "runtime.json"),
+            "prerequisites": read_json(run_dir / "prerequisites.json"),
+            "flavors": read_json(run_dir / "flavors.json"),
+            "placement": read_json(run_dir / "placement.json"),
+            "guest_workload_window": state.summary.get("guest_workload_window"),
+            "guest_versions": [e for e in events if e.get("event") == "software_versions"],
+            "guest_network_settings": [
+                e
+                for e in events
+                if e.get("event")
+                in {
+                    "network_interface_validation",
+                    "network_queue_tuning",
+                    "network_rx_ring_tuning",
+                    "network_interrupt_coalescing_tuning",
+                    "network_large_receive_offload_tuning",
+                    "network_tx_qdisc_tuning",
+                }
+            ],
+        },
+        "cleanup_receipt": "cleanup.json" if cleanup else None,
+        "cleanup_status": cleanup.get("status", state.summary.get("cleanup_status", "unverified")),
     }
+    report["target_attainment"] = _target_attainment(report)
     atomic_write_json(run_dir / "final-report.json", report)
     (run_dir / "final-report.md").write_text(render_markdown_report(report), encoding="utf-8")
-    domain_summary = build_domain_summary(run_dir, report, metrics)
+    domain_summary = build_domain_summary(run_dir, report, eligible)
     atomic_write_json(run_dir / "summary.json", domain_summary)
     (run_dir / "summary.md").write_text(
         render_domain_summary_markdown(domain_summary),
@@ -66,6 +104,10 @@ def build_domain_summary(
         "run_id": report.get("run_id"),
         "status": report.get("status"),
         "steady_state_window": report.get("steady_state_window"),
+        "workload_success": report.get("workload_success"),
+        "measurement_validity": report.get("measurement_validity"),
+        "cleanup_status": report.get("cleanup_status"),
+        "target_attainment": report.get("target_attainment"),
         "compute": _compute_summary(requested, achieved, metrics),
         "network": _network_summary(requested, achieved, metrics),
         "storage": _storage_summary(requested, achieved, metrics),
@@ -75,6 +117,7 @@ def build_domain_summary(
             "final_report_markdown": "final-report.md",
             "metrics": "metrics.jsonl",
             "events": "events.jsonl",
+            "cleanup_receipt": report.get("cleanup_receipt"),
             "rally_summary": "api-rally/summary.json" if rally_summary else None,
             "rally_results": "api-rally/results.json" if rally_summary else None,
         },
@@ -146,6 +189,14 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         f"Status: `{report['status']}`",
         f"Target: `{report['target_percent']}%`",
+        f"Workload success: `{report.get('workload_success')}`",
+        f"Measurement validity: `{report.get('measurement_validity', 'unverified')}`",
+        f"Cleanup: `{report.get('cleanup_status', 'unverified')}`",
+        "",
+        "Statistics use only timestamped observations contained in the recorded measurement window. "
+        "Network rates are duration-weighted per-flow means, summed once per receiver direction. "
+        "They are completed-attempt statistics, not a claim of continuous throughput. "
+        "See the JSON evidence coverage, excluded observations and retained failed attempts.",
         "",
         "## Requested load",
         "",
@@ -157,23 +208,23 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "",
         "## Workload observed",
         "",
-        f"- iperf workload goodput avg: {achieved.get('iperf.goodput_gbps_avg', 0)} Gbit/s",
-        f"- fio read bandwidth avg: {achieved.get('fio.read_gbps_avg', 0)} Gbit/s",
-        f"- fio write bandwidth avg: {achieved.get('fio.write_gbps_avg', 0)} Gbit/s",
-        f"- fio read IOPS avg: {achieved.get('fio.read_iops_avg', 0)}",
-        f"- fio write IOPS avg: {achieved.get('fio.write_iops_avg', 0)}",
-        f"- API achieved avg: {achieved.get('api.ops_per_second_avg', 0)} ops/s",
-        f"- API success avg: {achieved.get('api.success_ops_per_second_avg', 0)} ops/s",
-        f"- Rally API achieved avg: {achieved.get('api.rally.total_ops_per_second_avg', 0)} ops/s",
-        f"- Rally API success avg: {achieved.get('api.rally.success_ops_per_second_avg', 0)} ops/s",
-        f"- API errors: {achieved.get('api.errors_avg', 0)}",
-        f"- API error rate: {achieved.get('api.error_rate_avg', 0)}",
-        f"- Rally API errors: {achieved.get('api.rally.errors_avg', 0)}",
-        f"- Rally API error rate: {achieved.get('api.rally.error_rate_avg', 0)}",
-        f"- API latency p95: {achieved.get('api.latency_p95_ms_avg', 0)} ms",
-        f"- API latency p99: {achieved.get('api.latency_p99_ms_avg', 0)} ms",
-        f"- Rally API latency p95: {achieved.get('api.rally.latency_p95_ms_avg', 0)} ms",
-        f"- Rally API latency p99: {achieved.get('api.rally.latency_p99_ms_avg', 0)} ms",
+        f"- iperf workload goodput avg: {achieved.get('iperf.goodput_gbps_avg', 'unavailable')} Gbit/s",
+        f"- fio read bandwidth avg: {achieved.get('fio.read_gbps_avg', 'unavailable')} Gbit/s",
+        f"- fio write bandwidth avg: {achieved.get('fio.write_gbps_avg', 'unavailable')} Gbit/s",
+        f"- fio read IOPS avg: {achieved.get('fio.read_iops_avg', 'unavailable')}",
+        f"- fio write IOPS avg: {achieved.get('fio.write_iops_avg', 'unavailable')}",
+        f"- API achieved avg: {achieved.get('api.ops_per_second_avg', 'unavailable')} ops/s",
+        f"- API success avg: {achieved.get('api.success_ops_per_second_avg', 'unavailable')} ops/s",
+        f"- Rally API achieved avg: {achieved.get('api.rally.total_ops_per_second_avg', 'unavailable')} ops/s",
+        f"- Rally API success avg: {achieved.get('api.rally.success_ops_per_second_avg', 'unavailable')} ops/s",
+        f"- API errors: {achieved.get('api.errors_avg', 'unavailable')}",
+        f"- API error rate: {achieved.get('api.error_rate_avg', 'unavailable')}",
+        f"- Rally API errors: {achieved.get('api.rally.errors_avg', 'unavailable')}",
+        f"- Rally API error rate: {achieved.get('api.rally.error_rate_avg', 'unavailable')}",
+        f"- API latency p95: {achieved.get('api.latency_p95_ms_avg', 'unavailable')} ms",
+        f"- API latency p99: {achieved.get('api.latency_p99_ms_avg', 'unavailable')} ms",
+        f"- Rally API latency p95: {achieved.get('api.rally.latency_p95_ms_avg', 'unavailable')} ms",
+        f"- Rally API latency p99: {achieved.get('api.rally.latency_p99_ms_avg', 'unavailable')} ms",
         "",
         "## Conclusion",
         "",
@@ -182,32 +233,73 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "interfaces and does not prove exact physical fabric throughput.",
     ]
     if report.get("observability"):
-        lines.extend(["", "## Prometheus evidence", "", json.dumps(report["observability"], indent=2)])
+        lines.extend(
+            ["", "## Prometheus evidence", "", json.dumps(report["observability"], indent=2)]
+        )
     return "\n".join(lines) + "\n"
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def _summarize_metrics(metrics: list[dict[str, Any]]) -> dict[str, float]:
-    result: dict[str, float] = {}
-    grouped: dict[str, dict[str, list[float]]] = {}
+    result = {}
+    grouped = {}
     for metric in metrics:
+        left, right = metric.get("measurement_start"), metric.get("measurement_end")
+        weight = float(right) - float(left) if left is not None and right is not None else 1
+        if weight <= 0:
+            continue
         grouped.setdefault(metric["metric"], {}).setdefault(_metric_series_key(metric), []).append(
-            float(metric["value"])
+            (float(metric["value"]), weight)
         )
     for name, series in grouped.items():
-        series_avgs = [sum(values) / len(values) for values in series.values()]
-        aggregate_avg = _aggregate_series_averages(name, series_avgs)
-        result[f"{name}_avg"] = aggregate_avg
+        means = [
+            sum(value * weight for value, weight in samples) / sum(weight for _, weight in samples)
+            for samples in series.values()
+        ]
+        aggregate = _aggregate_series_averages(name, means)
+        result[f"{name}_avg"] = aggregate
         if name.endswith("_bps"):
-            result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
-        if name.endswith(".goodput_bps"):
-            result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate_avg / 1_000_000_000
+            result[f"{name.removesuffix('_bps')}_gbps_avg"] = aggregate / 1e9
     return result
+
+
+def _target_attainment(report):
+    if report["measurement_validity"] != "valid_observations":
+        return {"status": "unassessed", "reason": "measurement evidence invalid"}
+    requested, achieved = report["requested"], report["achieved"]
+    pairs = {
+        "network_gbps": "iperf.goodput_gbps_avg",
+        "storage_read_gbps": "fio.read_gbps_avg",
+        "storage_write_gbps": "fio.write_gbps_avg",
+        "api_ops_per_second": "api.success_ops_per_second_avg",
+    }
+    achieved = dict(achieved)
+    achieved["fio.total_iops_avg"] = achieved.get("fio.read_iops_avg", 0) + achieved.get(
+        "fio.write_iops_avg", 0
+    )
+    pairs["storage_iops"] = "fio.total_iops_avg"
+    results = {
+        name: {
+            "requested": requested[name],
+            "observed": achieved.get(metric),
+            "met": achieved.get(metric, 0) >= requested[name],
+        }
+        for name, metric in pairs.items()
+        if requested.get(name, 0) > 0
+    }
+    return {
+        "status": "observed_samples_only",
+        "metrics": results,
+        "compute": "allocation target, not CPU utilization",
+        "continuous_rate_claimed": False,
+    }
 
 
 def _compute_summary(
@@ -238,7 +330,11 @@ def _network_summary(
     flows = {
         (
             str(item.get("worker_id", "")),
-            str((item.get("tags") or {}).get("flow_id") or (item.get("tags") or {}).get("receiver") or ""),
+            str(
+                (item.get("tags") or {}).get("flow_id")
+                or (item.get("tags") or {}).get("receiver")
+                or ""
+            ),
         )
         for item in metrics
         if item.get("metric") == "iperf.goodput_bps"

@@ -175,3 +175,32 @@ class FakeConnection:
         self.compute = FakeCompute()
         self.network = FakeNetwork(fail_list_ports=fail_list_ports)
         self.block_storage = FakeBlockStorage()
+
+
+def test_low_rate_api_measurement_covers_full_requested_window(tmp_path):
+    import json
+
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    workload = ApiWorkload(
+        conn=FakeConnection(),
+        operation_mix={"list_servers": 1},
+        target_ops_per_second=0.1,
+        duration_seconds=10,
+        run_id="r",
+        project_name="owned",
+        network_id="network",
+        metric_writer=MetricWriter(tmp_path / "metrics.jsonl", "r"),
+        event_writer=EventWriter(tmp_path / "events.jsonl", "r"),
+        sleeper=sleep,
+        clock=lambda: now[0],
+    )
+    result = workload.run()
+    assert result.successes == result.attempts == 1
+    assert now[0] == 10
+    metrics = [json.loads(line) for line in (tmp_path / "metrics.jsonl").read_text().splitlines()]
+    rates = {metric["metric"]: metric["value"] for metric in metrics}
+    assert rates["api.success_ops_per_second"] == 0.1

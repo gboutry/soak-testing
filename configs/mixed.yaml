@@ -1,0 +1,39 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-soak
+management:
+  allowed_cidrs:
+  - 198.51.100.10/32
+flavors:
+  controller: soak-controller
+  compute_worker: soak-compute
+  network_worker: soak-network
+  storage_worker: soak-storage
+targets:
+  compute:
+    vcpus: 16
+    ram_gib: 32
+  network:
+    gbps: 20
+  api:
+    ops_per_second: 10
+workloads:
+  compute:
+    enabled: true
+  network:
+    enabled: true
+    flow_duration: 60s
+    offered_load: target
+    target_gbps_per_flow: 10
+    parallel_streams_per_flow: 4
+  storage:
+    enabled: true
+    volume_size_gib: 20
+    worker_count: 1
+    profile: mixed-randrw
+  api:
+    enabled: true
+    engine: native
+    operation_mix:
+      list_servers: 1
+      list_ports: 1

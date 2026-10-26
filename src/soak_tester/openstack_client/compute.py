@@ -9,6 +9,7 @@ def require_flavor(conn: Any, name: str) -> FlavorSpec:
     flavor = conn.compute.find_flavor(name)
     if flavor is None:
         raise RuntimeError(f"flavor not found: {name}")
+    flavor = conn.compute.fetch_flavor_extra_specs(flavor)
     return flavor_spec_from_sdk(flavor)
 
 
@@ -53,9 +54,8 @@ def list_hypervisor_names(conn: Any) -> list[str]:
             continue
         if status and str(status).lower() != "enabled":
             continue
-        name = (
-            _resource_value(hypervisor, "hypervisor_hostname")
-            or _resource_value(hypervisor, "name")
+        name = _resource_value(hypervisor, "hypervisor_hostname") or _resource_value(
+            hypervisor, "name"
         )
         if name:
             names.append(str(name))

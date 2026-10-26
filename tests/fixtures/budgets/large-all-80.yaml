@@ -1,0 +1,79 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-mixed-benchmark-perf-20261014-r2
+  member_role: member
+management:
+  allowed_cidrs:
+  - 91.189.91.55/32
+  - 10.17.2.58/32
+resources:
+  project_prefix: soak-test
+  create_router: true
+  network_cidr: 10.251.0.0/20
+  floating_ips:
+    controller: true
+flavors:
+  controller: soak-test-controller
+  network_worker: soak-test-worker
+  storage_worker: soak-test-worker
+targets:
+  compute:
+    vcpus: 3187
+    ram_gib: 9510.6240234375
+  network:
+    gbps: 100
+    scope: per_host
+  storage:
+    read_gbps: 0
+    write_gbps: 0
+    iops: 0
+  api:
+    ops_per_second: 10
+workloads:
+  compute:
+    enabled: true
+    cpu_load_percent: 95
+    memory_load_percent: 95
+    flavor_mix:
+    - soak-test-large-rsv20
+    - soak-test-small-rsv20
+  network:
+    enabled: true
+    topology: full_mesh
+    hosts:
+    - compute-2.example.test
+    - compute-3.example.test
+    - compute-4.example.test
+    - compute-5.example.test
+    - compute-6.example.test
+    flow_duration: 60s
+    omit_seconds: 5
+    target_gbps_per_flow: 5
+    parallel_streams_per_flow: 8
+    sender_worker_target_gbps: 32
+    receiver_worker_target_gbps: 32
+    max_flows: 200
+    max_workers: 40
+    vnic_type: normal
+  storage:
+    enabled: true
+    volume_size_gib: 64
+    profile: mixed-randrw
+    block_size: 4k
+    iodepth: 32
+    numjobs: 4
+    rwmixread: 70
+    worker_count: 20
+  api:
+    enabled: true
+    engine: native
+    operation_mix:
+      list_servers: 50
+      list_ports: 30
+      list_volumes: 20
+boot_concurrency: 32
+run:
+  keep_resources: false
+observability:
+  prometheus:
+    enabled: false

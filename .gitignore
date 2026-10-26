@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local run evidence and campaign material
+/runs/
+/campaign-output/
+/outputs/
+/archive/
+/audit-evidence/
+/tmp/
+/configs/pc6a/

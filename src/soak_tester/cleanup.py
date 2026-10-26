@@ -4,7 +4,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from soak_tester.util import read_json
+from openstack.exceptions import ResourceNotFound
+
+from soak_tester.util import atomic_write_json, read_json, utcnow_iso
 
 
 ORDER = {
@@ -92,7 +94,45 @@ def cleanup_run(
     max_passes: int = 3,
     settle_seconds: float = 2.0,
 ) -> list[dict[str, Any]]:
+    try:
+        return _cleanup_run(
+            run_dir, conn, dry_run=dry_run, max_passes=max_passes, settle_seconds=settle_seconds
+        )
+    except Exception as exc:
+        if not dry_run:
+            atomic_write_json(
+                run_dir / "cleanup.json",
+                {
+                    "checked_at": utcnow_iso(),
+                    "status": "failed",
+                    "errors": [str(exc)],
+                    "remaining": None,
+                },
+            )
+        raise
+
+
+def _cleanup_run(
+    run_dir: Path,
+    conn: Any | None = None,
+    *,
+    dry_run: bool = False,
+    max_passes: int = 3,
+    settle_seconds: float = 2.0,
+) -> list[dict[str, Any]]:
     resources = load_resources(run_dir)
+    if (
+        not dry_run
+        and not (run_dir / "resources.json").exists()
+        and (read_json(run_dir / "state.json", {}) or {})
+        .get("timeline", {})
+        .get("provisioning_started_at")
+    ):
+        raise RuntimeError(
+            "Provisioning began but the resource manifest is missing; ownership is unverified"
+        )
+    if not dry_run and conn is not None:
+        _recover_identity(run_dir, resources, conn)
     actions = cleanup_actions(run_dir, resources, conn)
     if dry_run or conn is None:
         return actions
@@ -104,12 +144,28 @@ def cleanup_run(
         for action in pass_actions:
             recorded = dict(action)
             try:
+                if recorded["type"] in {"project", "user"}:
+                    inventory = remaining_resources(conn, run_dir, check_identity=False)
+                    if inventory["errors"] or any(inventory["remaining"].values()):
+                        raise RuntimeError(
+                            "Tenant resource absence is not verified; retaining identity"
+                        )
                 _delete_resource(conn, recorded)
             except Exception as exc:
                 recorded["error"] = str(exc)
             executed.append(recorded)
         if cleanup_pass < max_passes - 1 and settle_seconds > 0:
             time.sleep(settle_seconds)
+    verification = remaining_resources(conn, run_dir)
+    receipt = {
+        "checked_at": utcnow_iso(),
+        "status": "passed"
+        if not verification["errors"] and not any(verification["remaining"].values())
+        else "failed",
+        "actions": executed,
+        **verification,
+    }
+    atomic_write_json(run_dir / "cleanup.json", receipt)
     return executed
 
 
@@ -120,7 +176,38 @@ def cleanup_actions(
 ) -> list[dict[str, Any]]:
     actions = _actions_from_resources(resources)
     if conn is not None:
-        actions.extend(_discover_neutron_actions(conn, _load_run_identity(run_dir, resources)))
+        identity = _load_run_identity(run_dir, resources)
+        actions.extend(_discover_neutron_actions(conn, identity))
+        if identity["project_id"]:
+            for service, method, kind, query in _tenant_queries(
+                conn,
+                identity["project_id"],
+                next(
+                    (r["id"] for r in resources.get("resources", []) if r["type"] == "user"), None
+                ),
+            ):
+                if service is None or not hasattr(service, method):
+                    continue
+                for resource in _list_resources(service, method, **query):
+                    if kind == "keypair" or _resource_matches_run(
+                        resource,
+                        identity["run_id"],
+                        identity["project_name"],
+                        identity["project_id"],
+                    ):
+                        actions.append(
+                            _action(
+                                kind,
+                                _attr(resource, "name")
+                                if kind == "keypair"
+                                else _attr(resource, "id"),
+                                _attr(resource, "name") or _attr(resource, "id"),
+                            )
+                        )
+    user_id = next((r["id"] for r in resources.get("resources", []) if r["type"] == "user"), None)
+    for action in actions:
+        if action["type"] == "keypair" and user_id:
+            action["extra"] = {**action.get("extra", {}), "user_id": user_id}
     return _ordered_actions(actions)
 
 
@@ -145,9 +232,7 @@ def _discover_neutron_actions(conn: Any, identity: dict[str, str | None]) -> lis
         for subnet in _list_resources(conn.network, "subnets", network_id=network_id):
             subnet_id = _attr(subnet, "id")
             if subnet_id:
-                actions.append(
-                    _action("subnet", subnet_id, _attr(subnet, "name") or subnet_id)
-                )
+                actions.append(_action("subnet", subnet_id, _attr(subnet, "name") or subnet_id))
         for port in _list_resources(conn.network, "ports", network_id=network_id):
             port_id = _attr(port, "id")
             if not port_id:
@@ -198,14 +283,7 @@ def _list_resources(service: Any, method_name: str, **query: Any) -> list[Any]:
     method = getattr(service, method_name, None)
     if method is None:
         return []
-    try:
-        return list(method(**query))
-    except TypeError:
-        if query:
-            return []
-        return list(method())
-    except Exception:
-        return []
+    return list(method(**query))
 
 
 def _resource_matches_run(
@@ -214,16 +292,19 @@ def _resource_matches_run(
     project_name: str | None,
     project_id: str | None,
 ) -> bool:
-    if project_id and _attr(resource, "project_id") == project_id:
-        return True
-    name = _attr(resource, "name") or ""
-    if project_name and name.startswith(project_name):
-        return True
+    if project_id:
+        # An explicit tenant boundary takes precedence over names or tags.
+        return _attr(resource, "project_id") == project_id
+    # Names alone cannot establish ownership in an admin-wide inventory.
     tags = _attr(resource, "tags") or []
-    if run_id and f"soak_tester_run_id={run_id}" in tags:
+    if run_id and f"soak_tester_run_id={run_id}" in tags and "soak_tester_owned=true" in tags:
         return True
     metadata = _attr(resource, "metadata") or {}
-    return bool(run_id and metadata.get("soak_tester_run_id") == run_id)
+    return bool(
+        run_id
+        and metadata.get("soak_tester_run_id") == run_id
+        and metadata.get("soak_tester_owned") == "true"
+    )
 
 
 def _is_router_interface_port(port: Any) -> bool:
@@ -294,10 +375,151 @@ def _delete_resource(conn: Any, action: dict[str, Any]) -> None:
     elif resource_type == "network":
         conn.network.delete_network(resource_id, ignore_missing=True)
     elif resource_type == "keypair":
-        conn.compute.delete_keypair(resource_id, ignore_missing=True)
+        conn.compute.delete_keypair(
+            resource_id,
+            ignore_missing=True,
+            **(
+                {"user_id": action["extra"]["user_id"]}
+                if action.get("extra", {}).get("user_id")
+                else {}
+            ),
+        )
     elif resource_type == "quota":
         return
     elif resource_type == "user":
         conn.identity.delete_user(resource_id, ignore_missing=True)
     elif resource_type == "project":
         conn.identity.delete_project(resource_id, ignore_missing=True)
+    else:
+        raise ValueError(f"unsupported resource type: {resource_type}")
+
+
+def _tenant_queries(conn, project_id, user_id=None):
+    return [
+        *(
+            [(getattr(conn, "compute", None), "keypairs", "keypair", {"user_id": user_id})]
+            if user_id
+            else []
+        ),
+        (
+            getattr(conn, "compute", None),
+            "servers",
+            "server",
+            {"all_projects": True, "project_id": project_id},
+        ),
+        (
+            getattr(conn, "block_storage", None),
+            "volumes",
+            "volume",
+            {"all_projects": True, "project_id": project_id},
+        ),
+        *[
+            (getattr(conn, "network", None), method, kind, {"project_id": project_id})
+            for method, kind in [
+                ("networks", "network"),
+                ("subnets", "subnet"),
+                ("routers", "router"),
+                ("ports", "port"),
+                ("ips", "floating_ip"),
+                ("security_groups", "security_group"),
+            ]
+        ],
+    ]
+
+
+def remaining_resources(conn, run_dir: Path, *, check_identity: bool = True) -> dict[str, Any]:
+    """Fail closed when any owned-resource inventory cannot be read."""
+    resources = load_resources(run_dir)
+    identity = _load_run_identity(run_dir, resources)
+    remaining, errors = {}, []
+    project_id = identity["project_id"]
+    user_id = next((r["id"] for r in resources.get("resources", []) if r["type"] == "user"), None)
+    if project_id:
+        for service, method, kind, query in _tenant_queries(conn, project_id, user_id):
+            try:
+                remaining[kind] = [
+                    str(_attr(item, "id") or _attr(item, "name"))
+                    for item in getattr(service, method)(**query)
+                ]
+            except Exception as exc:
+                errors.append(f"{kind} inventory: {exc}")
+    # Read every recorded object by ID as well as inventory, including identity and user-scoped keypairs.
+    getters = {
+        "server": ("compute", "get_server"),
+        "volume": ("block_storage", "get_volume"),
+        "floating_ip": ("network", "get_ip"),
+        "port": ("network", "get_port"),
+        "network": ("network", "get_network"),
+        "subnet": ("network", "get_subnet"),
+        "router": ("network", "get_router"),
+        "security_group": ("network", "get_security_group"),
+        "project": ("identity", "get_project"),
+        "user": ("identity", "get_user"),
+        "keypair": ("compute", "get_keypair"),
+    }
+    for item in resources.get("resources", []):
+        kind, resource_id = item.get("type"), item.get("id")
+        if kind == "quota":
+            continue
+        if kind == "router_interface":
+            extra = item.get("extra", {})
+            try:
+                router_id = extra.get("router_id")
+                subnet_id = extra.get("subnet_id")
+                if not router_id or not subnet_id:
+                    raise ValueError("router interface identity is incomplete")
+                if conn.network.get_router(router_id) is not None:
+                    ports = list(conn.network.ports(device_id=router_id))
+                    if any(subnet_id in _port_subnet_ids(port) for port in ports):
+                        remaining.setdefault(kind, []).append(str(resource_id))
+            except ResourceNotFound:
+                pass
+            except Exception as exc:
+                errors.append(f"router_interface {resource_id}: {exc}")
+            continue
+        if kind not in getters:
+            errors.append(f"Unsupported recorded resource type: {kind}")
+            continue
+        if not check_identity and kind in {"project", "user"}:
+            continue
+        service, method = getters[kind]
+        try:
+            kwargs = {"user_id": user_id} if kind == "keypair" and user_id else {}
+            found = getattr(getattr(conn, service), method)(resource_id, **kwargs)
+            if found is not None:
+                remaining.setdefault(kind, []).append(str(resource_id))
+        except ResourceNotFound:
+            pass
+        except Exception as exc:
+            errors.append(f"{kind} {resource_id}: {exc}")
+    if not project_id and read_json(run_dir / "ownership-intent.json"):
+        # No ID can mean an uncertain identity create response, rather than no creation.
+        intent = read_json(run_dir / "ownership-intent.json")
+        try:
+            for kind, method in [("project", "projects"), ("user", "users")]:
+                remaining[kind] = [
+                    str(_attr(r, "id"))
+                    for r in getattr(conn.identity, method)(name=intent["name"])
+                    if _attr(r, "description") == intent["description"]
+                ]
+        except Exception as exc:
+            errors.append(f"identity intent verification: {exc}")
+    return {"remaining": {k: sorted(set(v)) for k, v in remaining.items()}, "errors": errors}
+
+
+def _recover_identity(run_dir, resources, conn):
+    intent = read_json(run_dir / "ownership-intent.json")
+    if not intent:
+        return
+    for kind, method in [("project", "projects"), ("user", "users")]:
+        for item in getattr(conn.identity, method)(name=intent["name"]):
+            if _attr(item, "description") != intent["description"]:
+                continue
+            if not any(
+                r["type"] == kind and r["id"] == _attr(item, "id")
+                for r in resources.get("resources", [])
+            ):
+                resources.setdefault("resources", []).append(
+                    {"type": kind, "id": _attr(item, "id"), "name": _attr(item, "name")}
+                )
+    atomic_write_json(run_dir / "resources.json", resources)

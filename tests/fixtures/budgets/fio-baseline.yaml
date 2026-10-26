@@ -1,0 +1,44 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-mixed-benchmark-perf-20261014-r2
+  member_role: member
+management:
+  allowed_cidrs:
+  - 91.189.91.55/32
+  - 10.17.2.58/32
+resources:
+  project_prefix: soak-test
+  create_router: true
+  network_cidr: 10.251.0.0/20
+  floating_ips:
+    controller: true
+flavors:
+  controller: soak-test-controller
+  storage_worker: soak-test-worker
+targets:
+  storage:
+    read_gbps: 0
+    write_gbps: 0
+    iops: 0
+workloads:
+  compute:
+    enabled: false
+  network:
+    enabled: false
+  storage:
+    enabled: true
+    volume_size_gib: 64
+    profile: mixed-randrw
+    block_size: 4k
+    iodepth: 32
+    numjobs: 4
+    rwmixread: 70
+    worker_count: 20
+  api:
+    enabled: false
+boot_concurrency: 32
+run:
+  keep_resources: false
+observability:
+  prometheus:
+    enabled: false

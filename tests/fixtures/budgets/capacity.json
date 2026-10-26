@@ -1,0 +1,202 @@
+{
+  "observed_utc": "2026-10-14T18:51:33.033138+00:00",
+  "hosts": [
+    "compute-2.example.test",
+    "compute-3.example.test",
+    "compute-4.example.test",
+    "compute-5.example.test",
+    "compute-6.example.test"
+  ],
+  "cpu_allocation_ratio": 4,
+  "schedulable_vcpus": 3440,
+  "schedulable_ram_mb": 10255999,
+  "available_root_disk_gb": 29565,
+  "target_percent": 80,
+  "target_vcpus": 2752,
+  "target_ram_gib": 8012.49921875,
+  "assumptions": [
+    "Existing VM allocations were zero",
+    "Support planes included in aggregate CPU/RAM accounting",
+    "Network throughput is requested load, not measured fabric capacity",
+    "No invented Ceph performance threshold; record measured IOPS/bandwidth/latencies"
+  ],
+  "placement_inventories": [
+    {
+      "provider": "3dcc2d20-750b-4949-a037-f1d6397638fc",
+      "inventory": [
+        {
+          "resource_class": "VCPU",
+          "allocation_ratio": 4.0,
+          "min_unit": 1,
+          "max_unit": 172,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 172,
+          "used": 0
+        },
+        {
+          "resource_class": "MEMORY_MB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 2051712,
+          "reserved": 512,
+          "step_size": 1,
+          "total": 2051712,
+          "used": 0
+        },
+        {
+          "resource_class": "DISK_GB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 5913,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 5913,
+          "used": 0
+        }
+      ]
+    },
+    {
+      "provider": "988ba90e-96a7-498f-932f-6b2c2393bc4b",
+      "inventory": [
+        {
+          "resource_class": "VCPU",
+          "allocation_ratio": 4.0,
+          "min_unit": 1,
+          "max_unit": 172,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 172,
+          "used": 0
+        },
+        {
+          "resource_class": "MEMORY_MB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 2051712,
+          "reserved": 512,
+          "step_size": 1,
+          "total": 2051712,
+          "used": 0
+        },
+        {
+          "resource_class": "DISK_GB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 5913,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 5913,
+          "used": 0
+        }
+      ]
+    },
+    {
+      "provider": "51c46e8a-e757-4410-b72f-469c849093ca",
+      "inventory": [
+        {
+          "resource_class": "VCPU",
+          "allocation_ratio": 4.0,
+          "min_unit": 1,
+          "max_unit": 172,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 172,
+          "used": 0
+        },
+        {
+          "resource_class": "MEMORY_MB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 2051712,
+          "reserved": 512,
+          "step_size": 1,
+          "total": 2051712,
+          "used": 0
+        },
+        {
+          "resource_class": "DISK_GB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 5913,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 5913,
+          "used": 0
+        }
+      ]
+    },
+    {
+      "provider": "3c10569d-5245-4aa8-b479-41273de572a8",
+      "inventory": [
+        {
+          "resource_class": "VCPU",
+          "allocation_ratio": 4.0,
+          "min_unit": 1,
+          "max_unit": 172,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 172,
+          "used": 0
+        },
+        {
+          "resource_class": "MEMORY_MB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 2051712,
+          "reserved": 512,
+          "step_size": 1,
+          "total": 2051712,
+          "used": 0
+        },
+        {
+          "resource_class": "DISK_GB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 5913,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 5913,
+          "used": 0
+        }
+      ]
+    },
+    {
+      "provider": "94015e21-b31d-4fea-8d19-a10c7956a9bf",
+      "inventory": [
+        {
+          "resource_class": "VCPU",
+          "allocation_ratio": 4.0,
+          "min_unit": 1,
+          "max_unit": 172,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 172,
+          "used": 0
+        },
+        {
+          "resource_class": "MEMORY_MB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 2051711,
+          "reserved": 512,
+          "step_size": 1,
+          "total": 2051711,
+          "used": 0
+        },
+        {
+          "resource_class": "DISK_GB",
+          "allocation_ratio": 1.0,
+          "min_unit": 1,
+          "max_unit": 5913,
+          "reserved": 0,
+          "step_size": 1,
+          "total": 5913,
+          "used": 0
+        }
+      ]
+    }
+  ],
+  "discovery_started_utc": "2026-10-14T12:37:27.740357+00:00",
+  "reserved_cpu_threads_per_host": 20
+}

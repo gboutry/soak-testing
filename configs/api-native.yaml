@@ -1,0 +1,24 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-soak
+management:
+  allowed_cidrs:
+  - 198.51.100.10/32
+flavors:
+  controller: soak-controller
+targets:
+  api:
+    ops_per_second: 10
+workloads:
+  compute:
+    enabled: false
+  network:
+    enabled: false
+  storage:
+    enabled: false
+  api:
+    enabled: true
+    engine: native
+    operation_mix:
+      list_servers: 1
+      list_ports: 1

@@ -1,0 +1,99 @@
+flavors:
+  soak-test-controller:
+    vcpus: 2
+    ram_mb: 4096
+    disk_gb: 16
+  soak-test-worker:
+    vcpus: 4
+    ram_mb: 8192
+    disk_gb: 16
+  soak-test-small:
+    vcpus: 2
+    ram_mb: 5424
+    disk_gb: 16
+  soak-test-large:
+    vcpus: 32
+    ram_mb: 86928
+    disk_gb: 20
+  soak-test-small-rsv20:
+    vcpus: 2
+    ram_mb: 6110
+    disk_gb: 16
+  soak-test-large-rsv20:
+    vcpus: 32
+    ram_mb: 97760
+    disk_gb: 20
+  soak-test-network16:
+    vcpus: 16
+    ram_mb: 32768
+    disk_gb: 16
+  soak-test-network8:
+    vcpus: 8
+    ram_mb: 16384
+    disk_gb: 16
+  soak-test-network8-numa:
+    vcpus: 8
+    ram_mb: 16384
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:vif_multiqueue_enabled: 'true'
+  soak-test-network4-numa:
+    vcpus: 4
+    ram_mb: 16384
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:vif_multiqueue_enabled: 'true'
+  soak-test-network4-8g-numa:
+    vcpus: 4
+    ram_mb: 8192
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:vif_multiqueue_enabled: 'true'
+  soak-test-network8-numa-1g:
+    vcpus: 8
+    ram_mb: 16384
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:vif_multiqueue_enabled: 'true'
+      hw:mem_page_size: '1048576'
+  soak-test-network4-numa-1g:
+    vcpus: 4
+    ram_mb: 16384
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:mem_page_size: '1048576'
+  soak-test-network2-numa-1g:
+    vcpus: 2
+    ram_mb: 8192
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: shared
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:mem_page_size: '1048576'
+  soak-test-network4-numa-1g-pinned:
+    vcpus: 4
+    ram_mb: 16384
+    disk_gb: 16
+    extra_specs:
+      hw:cpu_policy: dedicated
+      hw:cpu_thread_policy: require
+      hw:emulator_threads_policy: share
+      hw:numa_nodes: '1'
+      hw:pci_numa_affinity_policy: required
+      hw:mem_page_size: '1048576'

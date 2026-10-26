@@ -1,0 +1,265 @@
+# Run with: promtool test rules tests/fixtures/showcase-promql.yaml
+# Python tests ensure these expressions stay aligned with the dashboard.
+rule_files: []
+evaluation_interval: 1m
+tests:
+- name: panel18.A.normal
+  interval: 1m
+  input_series:
+  - series: libvirt_domain_info_vstate{domain="vm-a"}
+    values: 1x5
+  - series: libvirt_domain_info_vstate{domain="vm-b"}
+    values: 1x5
+  - series: libvirt_domain_info_vstate{domain="vm-c"}
+    values: 5x5
+  promql_expr_test:
+  - expr: count_values("state", libvirt_domain_info_vstate{domain=~".*"} or libvirt_domain_info_state{domain=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{state="1"}'
+      value: 2
+    - labels: '{state="5"}'
+      value: 1
+- name: panel62.A.normal
+  interval: 1m
+  input_series:
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.0"}
+    values: 1x5
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.0"}
+    values: 1x5
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.1"}
+    values: '0x5'
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.1"}
+    values: 1x5
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.2"}
+    values: 1x5
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.2"}
+    values: '0x5'
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.3"}
+    values: '0x5'
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.3"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: sum(((ceph_osd_up == bool 0) + (ceph_osd_in == bool 0)) > bool 0)
+    eval_time: 5m
+    exp_samples:
+    - labels: '{}'
+      value: 3
+- name: panel88.A.normal
+  interval: 1m
+  input_series:
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.0"}
+    values: 1x5
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.0"}
+    values: 1x5
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.1"}
+    values: '0x5'
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.1"}
+    values: 1x5
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.2"}
+    values: 1x5
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.2"}
+    values: '0x5'
+  - series: ceph_osd_up{instance="ceph",ceph_daemon="osd.3"}
+    values: '0x5'
+  - series: ceph_osd_in{instance="ceph",ceph_daemon="osd.3"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: sum(((ceph_osd_up == bool 0) + (ceph_osd_in == bool 0)) > bool 0)
+    eval_time: 5m
+    exp_samples:
+    - labels: '{}'
+      value: 3
+- name: panel76.A.normal
+  interval: 1m
+  input_series:
+  - series: ceph_pool_percent_used{instance="ceph",pool_id="1"}
+    values: 0.25x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="1",name="images"}
+    values: 1x5
+  promql_expr_test:
+  - expr: 100 * sum by (name) (ceph_pool_percent_used * on (instance, pool_id) group_left(name)
+      ceph_pool_metadata{name=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{name="images"}'
+      value: 25
+- name: panel73.A.normal
+  interval: 1m
+  input_series:
+  - series: ceph_pool_rd_bytes_total{instance="ceph",pool_id="1"}
+    values: 0+120x5
+  - series: ceph_pool_rd_bytes{instance="ceph",pool_id="1"}
+    values: 0+60x5
+  - series: ceph_pool_rd_bytes{instance="ceph",pool_id="2"}
+    values: 0+180x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="1",name="images"}
+    values: 1x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="2",name="volumes"}
+    values: 1x5
+  promql_expr_test:
+  - expr: sum by (name) ((rate(ceph_pool_rd_bytes_total[5m]) or rate(ceph_pool_rd_bytes[5m]))
+      * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{name="images"}'
+      value: 2
+    - labels: '{name="volumes"}'
+      value: 3
+- name: panel73.B.normal
+  interval: 1m
+  input_series:
+  - series: ceph_pool_wr_bytes_total{instance="ceph",pool_id="1"}
+    values: 0+120x5
+  - series: ceph_pool_wr_bytes{instance="ceph",pool_id="1"}
+    values: 0+60x5
+  - series: ceph_pool_wr_bytes{instance="ceph",pool_id="2"}
+    values: 0+180x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="1",name="images"}
+    values: 1x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="2",name="volumes"}
+    values: 1x5
+  promql_expr_test:
+  - expr: sum by (name) ((rate(ceph_pool_wr_bytes_total[5m]) or rate(ceph_pool_wr_bytes[5m]))
+      * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{name="images"}'
+      value: 2
+    - labels: '{name="volumes"}'
+      value: 3
+- name: panel74.A.normal
+  interval: 1m
+  input_series:
+  - series: ceph_pool_rd_total{instance="ceph",pool_id="1"}
+    values: 0+120x5
+  - series: ceph_pool_rd{instance="ceph",pool_id="1"}
+    values: 0+60x5
+  - series: ceph_pool_rd{instance="ceph",pool_id="2"}
+    values: 0+180x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="1",name="images"}
+    values: 1x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="2",name="volumes"}
+    values: 1x5
+  promql_expr_test:
+  - expr: sum by (name) ((rate(ceph_pool_rd_total[5m]) or rate(ceph_pool_rd[5m]))
+      * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{name="images"}'
+      value: 2
+    - labels: '{name="volumes"}'
+      value: 3
+- name: panel74.B.normal
+  interval: 1m
+  input_series:
+  - series: ceph_pool_wr_total{instance="ceph",pool_id="1"}
+    values: 0+120x5
+  - series: ceph_pool_wr{instance="ceph",pool_id="1"}
+    values: 0+60x5
+  - series: ceph_pool_wr{instance="ceph",pool_id="2"}
+    values: 0+180x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="1",name="images"}
+    values: 1x5
+  - series: ceph_pool_metadata{instance="ceph",pool_id="2",name="volumes"}
+    values: 1x5
+  promql_expr_test:
+  - expr: sum by (name) ((rate(ceph_pool_wr_total[5m]) or rate(ceph_pool_wr[5m]))
+      * on (instance, pool_id) group_left(name) ceph_pool_metadata{name=~".*"})
+    eval_time: 5m
+    exp_samples:
+    - labels: '{name="images"}'
+      value: 2
+    - labels: '{name="volumes"}'
+      value: 3
+- name: panel80.A.normal
+  interval: 1m
+  input_series:
+  - series: openstack_nova_agent_state{id="new"}
+    values: 1x5
+  - series: openstack_nova_agent_state_total{id="new"}
+    values: '0x5'
+  - series: openstack_nova_agent_state_total{id="legacy"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: (openstack_nova_agent_state or openstack_nova_agent_state_total)
+    eval_time: 5m
+    exp_samples:
+    - labels: openstack_nova_agent_state{id="new"}
+      value: 1
+    - labels: openstack_nova_agent_state_total{id="legacy"}
+      value: 0
+- name: panel80.B.normal
+  interval: 1m
+  input_series:
+  - series: openstack_neutron_agent_state{id="new"}
+    values: 1x5
+  - series: openstack_neutron_agent_state_total{id="new"}
+    values: '0x5'
+  - series: openstack_neutron_agent_state_total{id="legacy"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: (openstack_neutron_agent_state or openstack_neutron_agent_state_total)
+    eval_time: 5m
+    exp_samples:
+    - labels: openstack_neutron_agent_state{id="new"}
+      value: 1
+    - labels: openstack_neutron_agent_state_total{id="legacy"}
+      value: 0
+- name: panel80.C.normal
+  interval: 1m
+  input_series:
+  - series: openstack_cinder_agent_state{id="new"}
+    values: 1x5
+  - series: openstack_cinder_agent_state_total{id="new"}
+    values: '0x5'
+  - series: openstack_cinder_agent_state_total{id="legacy"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: (openstack_cinder_agent_state or openstack_cinder_agent_state_total)
+    eval_time: 5m
+    exp_samples:
+    - labels: openstack_cinder_agent_state{id="new"}
+      value: 1
+    - labels: openstack_cinder_agent_state_total{id="legacy"}
+      value: 0
+- name: panel91.A.normal
+  interval: 1m
+  input_series:
+  - series: openstack_nova_agent_state{id="alive"}
+    values: 1x5
+  - series: openstack_cinder_agent_state{id="down"}
+    values: '0x5'
+  promql_expr_test:
+  - expr: ((openstack_nova_agent_state or openstack_nova_agent_state_total) == 0)
+      or ((openstack_neutron_agent_state or openstack_neutron_agent_state_total) ==
+      0) or ((openstack_cinder_agent_state or openstack_cinder_agent_state_total)
+      == 0)
+    eval_time: 5m
+    exp_samples:
+    - labels: openstack_cinder_agent_state{id="down"}
+      value: 0
+- name: panel47.A.normal
+  interval: 1m
+  input_series:
+  - series: ovs_vswitchd_dp_packets_total{instance="host",datapath="ovs-system"}
+    values: 0+60x5
+  promql_expr_test:
+  - expr: clamp_min(delta(ovs_vswitchd_dp_packets_total{instance=~".*"}[5m]) / 300,
+      0)
+    eval_time: 5m
+    exp_samples:
+    - labels: '{instance="host",datapath="ovs-system"}'
+      value: 1
+- name: panel47.A.reset
+  interval: 1m
+  input_series:
+  - series: ovs_vswitchd_dp_packets_total{instance="host",datapath="ovs-system"}
+    values: 1000 1010 10 20 30 40
+  promql_expr_test:
+  - expr: clamp_min(delta(ovs_vswitchd_dp_packets_total{instance=~".*"}[5m]) / 300,
+      0)
+    eval_time: 5m
+    exp_samples:
+    - labels: '{instance="host",datapath="ovs-system"}'
+      value: 0

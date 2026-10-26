@@ -1,0 +1,22 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-soak
+management:
+  allowed_cidrs:
+  - 198.51.100.10/32
+flavors:
+  controller: soak-controller
+  storage_worker: soak-storage
+targets: {}
+workloads:
+  compute:
+    enabled: false
+  network:
+    enabled: false
+  storage:
+    enabled: true
+    volume_size_gib: 20
+    worker_count: 1
+    profile: mixed-randrw
+  api:
+    enabled: false

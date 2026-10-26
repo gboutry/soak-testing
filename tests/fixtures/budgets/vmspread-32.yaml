@@ -1,0 +1,54 @@
+boot_concurrency: 32
+flavors:
+  controller: soak-test-controller
+  network_worker: soak-test-network8
+management:
+  allowed_cidrs:
+  - 91.189.91.55/32
+  - 10.17.2.58/32
+observability:
+  prometheus:
+    enabled: false
+openstack:
+  external_network: external-network
+  image: ubuntu-mixed-benchmark-perf-20261014-r2
+  member_role: member
+resources:
+  create_router: true
+  floating_ips:
+    controller: true
+  network_cidr: 10.251.0.0/20
+  network_mtu: 8942
+  project_prefix: soak-test
+run:
+  keep_resources: false
+targets:
+  network:
+    gbps: 200
+    scope: per_host
+workloads:
+  api:
+    enabled: false
+  compute:
+    enabled: false
+  network:
+    enabled: true
+    flow_duration: 60s
+    guest_combined_queues: 8
+    guest_rx_ring_size: 256
+    hosts:
+    - compute-5.example.test
+    - compute-6.example.test
+    max_flows: 200
+    max_workers: 40
+    omit_seconds: 5
+    parallel_streams_per_flow: 4
+    receiver_worker_target_gbps: 25
+    sender_worker_target_gbps: 25
+    target_gbps_per_flow: 12.5
+    topology: full_mesh
+    vnic_type: normal
+    zerocopy: true
+    offered_load: unlimited
+  storage:
+    enabled: false

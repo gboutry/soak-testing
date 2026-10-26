@@ -1,7 +1,30 @@
 from pathlib import Path
 
+import pytest
+
 from soak_tester.config import load_config
 from soak_tester.planner import FlavorSpec, create_plan
+
+
+def fixture_flavors(config):
+    return {
+        name: FlavorSpec(name=name, vcpus=4, ram_gib=8)
+        for name in config.flavors.model_dump().values()
+        if name
+    }
+
+
+def test_network_full_mesh_uses_every_selected_host_as_a_source():
+    config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
+    config.targets.network.scope = "per_host"
+    config.targets.network.gbps = 200
+    config.workloads.network.topology = "full_mesh"
+    config.workloads.network.hosts = ["n1", "n2"]
+    plan = create_plan(config, target_percent=100, flavor_specs=fixture_flavors(config))
+    assert plan.network.target_gbps == 400
+    assert {f.source_host for f in plan.network.flow_assignments} == {"n1", "n2"}
+    assert all(f.source_host != f.dest_host for f in plan.network.flow_assignments)
+    assert len({f.receiver_port for f in plan.network.flow_assignments}) == plan.network.flows
 
 
 def test_planner_converts_target_to_resource_counts():
@@ -31,12 +54,12 @@ def test_planner_converts_target_to_resource_counts():
 def test_planner_models_per_host_full_mesh_network_capacity():
     config = load_config(Path(__file__).parent / "fixtures" / "config.yaml")
     config.targets.network.scope = "per_host"
-    config.targets.network.per_host_gbps = 200
+    config.targets.network.gbps = 200
     config.workloads.network.topology = "full_mesh"
     config.workloads.network.target_gbps_per_flow = 5
     config.workloads.network.sender_worker_target_gbps = 20
     config.workloads.network.receiver_worker_target_gbps = 20
-    config.workloads.network.host_count = 3
+    config.workloads.network.hosts = ["host-000", "host-001", "host-002"]
     flavors = {
         "m1.soak-compute": FlavorSpec(name="m1.soak-compute", vcpus=8, ram_gib=16),
         "m1.soak-net": FlavorSpec(name="m1.soak-net", vcpus=4, ram_gib=8),
@@ -83,7 +106,9 @@ def test_planner_uses_all_receivers_in_aggregate_network_plan():
     plan = create_plan(config, target_percent=25, flavor_specs=flavors)
 
     receivers = {flow.receiver_worker_id for flow in plan.network.flow_assignments}
-    assert receivers == {f"network-receiver-{index:03d}" for index in range(plan.network.receiver_count)}
+    assert receivers == {
+        f"network-receiver-{index:03d}" for index in range(plan.network.receiver_count)
+    }
     assert len({flow.receiver_port for flow in plan.network.flow_assignments}) == plan.network.flows
 
 
@@ -163,3 +188,18 @@ def test_planner_uses_targets_for_requested_load():
     assert plan.network.target_gbps == 96
     assert plan.storage.target_iops == 160000
     assert plan.api.target_ops_per_second == 25.6
+
+
+@pytest.mark.parametrize(
+    "budget,value,message",
+    [
+        ("max_flows", 1, "max_flows"),
+        ("max_workers", 2, "max_workers"),
+        ("receiver_port_base", 65535, "ports exceed"),
+    ],
+)
+def test_aggregate_planning_enforces_budget_and_port_limits(budget, value, message):
+    config = load_config(Path(__file__).parent / "fixtures/config.yaml")
+    setattr(config.workloads.network, budget, value)
+    with pytest.raises(ValueError, match=message):
+        create_plan(config, target_percent=100, flavor_specs=fixture_flavors(config))

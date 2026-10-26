@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import pytest
 
 from soak_tester.run.provision import ResourceTracker, _run_boot_tasks
 
@@ -52,3 +53,21 @@ def test_resource_tracker_writes_all_records_from_threads(tmp_path):
     assert {record["id"] for record in payload["resources"]} == {
         f"server-{index}" for index in range(20)
     }
+
+
+def test_resource_tracker_does_not_destroy_existing_recovery_manifest(tmp_path):
+    tracker = ResourceTracker(tmp_path)
+    tracker.add({"type": "server", "id": "owned-vm"})
+    original = (tmp_path / "resources.json").read_bytes()
+    with pytest.raises(FileExistsError, match="overwrite"):
+        ResourceTracker(tmp_path)
+    assert (tmp_path / "resources.json").read_bytes() == original
+
+
+def test_interruption_persists_created_id_before_stopping(tmp_path):
+    tracker = ResourceTracker(tmp_path, stop_requested=lambda: True)
+    with pytest.raises(InterruptedError):
+        tracker.add({"type": "server", "id": "just-created"})
+    assert json.loads((tmp_path / "resources.json").read_text())["resources"] == [
+        {"type": "server", "id": "just-created"}
+    ]

@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
+import os
+import signal
+import subprocess
+import sys
+from importlib.metadata import version
+from contextlib import contextmanager
 import time
 from pathlib import Path
 from typing import Annotated
 
+import requests
 import typer
-import yaml
 from rich.console import Console
 from rich.table import Table
 
-from soak_tester.calibration import (
-    build_calibrated_config,
-    build_calibration_profile,
-    discover_cloud_capacity,
-    write_calibration_profile,
-)
 from soak_tester.cleanup import cleanup_run
 from soak_tester.config import dump_config, load_config
+from soak_tester.evidence import assess_run
 from soak_tester.events import EventWriter, MetricWriter
-from soak_tester.openstack_client.compute import list_hypervisor_names, require_flavor
+from soak_tester.openstack_client.compute import (
+    list_hypervisor_names,
+    require_flavor,
+    placement_record,
+)
 from soak_tester.openstack_client.connection import admin_connection
 from soak_tester.openstack_client.identity import get_role
 from soak_tester.openstack_client.image import require_image
@@ -29,26 +35,32 @@ from soak_tester.openstack_client.quota import read_quotas
 from soak_tester.openstack_client.volume import require_volume_type
 from soak_tester.observability.collect import collect_prometheus, inspect_prometheus
 from soak_tester.observability.correlate import correlation_report
-from soak_tester.planner import create_plan, default_flavor_specs, write_plan
+from soak_tester.planner import create_plan, write_plan
 from soak_tester.report import generate_final_report
 from soak_tester.run.collect import (
     collect_controller_artifacts,
+    collect_failure_console_outputs,
     wait_for_controller,
     wait_for_worker_heartbeats,
 )
 from soak_tester.run.provision import provision_openstack_run
 from soak_tester.run.status import read_status
-from soak_tester.state import initial_state, load_state, save_state
-from soak_tester.util import duration_seconds, ensure_dir, make_run_id, read_json, utcnow_iso
+from soak_tester.state import initial_state, load_state, save_state, run_lock
+from soak_tester.util import (
+    atomic_write_json,
+    duration_seconds,
+    ensure_dir,
+    make_run_id,
+    read_json,
+    utcnow_iso,
+)
 from soak_tester.workloads.api import ApiWorkload
-from soak_tester.workloads.api_rally import run_rally_api_workload
+from soak_tester.workloads.api_rally import run_rally_api_workload, require_rally
 
 console = Console()
 app = typer.Typer(help="OpenStack-native soak-load testing tool.")
 observability_app = typer.Typer(help="Prometheus evidence commands.")
-calibrate_app = typer.Typer(help="Calibration commands.")
 app.add_typer(observability_app, name="observability")
-app.add_typer(calibrate_app, name="calibrate")
 
 
 def main() -> None:
@@ -70,11 +82,12 @@ def inspect(
     checks.append(("member role", "ok"))
     require_image(conn, cfg.openstack.image)
     checks.append(("image", "ok"))
-    for flavor in sorted(set(cfg.flavors.model_dump().values())):
+    for flavor in sorted(_required_flavor_names(cfg)):
         require_flavor(conn, flavor)
         checks.append((f"flavor {flavor}", "ok"))
-    require_external_network(conn, cfg.openstack.external_network)
-    checks.append(("external router network", "ok"))
+    if cfg.resources.create_router:
+        require_external_network(conn, cfg.openstack.external_network)
+        checks.append(("external router network", "ok"))
     if cfg.workloads.storage.enabled:
         require_volume_type(conn, cfg.workloads.storage.volume_type)
         checks.append(("volume type", "ok"))
@@ -94,14 +107,12 @@ def plan(
     cfg = load_config(config)
     state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=None)
     save_state(run_dir, state)
-    try:
-        conn = admin_connection(os_cloud)
-        _prepare_openstack_context(conn, cfg)
-        flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
-    except Exception as exc:
-        console.print(f"[yellow]OpenStack flavor lookup unavailable, using 1 vCPU/1 GiB defaults: {exc}[/yellow]")
-        flavor_specs = default_flavor_specs(cfg)
-    soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
+    conn = admin_connection(os_cloud)
+    _prepare_openstack_context(conn, cfg)
+    flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
+    soak_plan = create_plan(
+        cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name
+    )
     _write_run_config(run_dir, config, cfg)
     write_plan(run_dir / "plan.yaml", soak_plan)
     EventWriter(run_dir / "events.jsonl", run_dir.name).write(
@@ -118,120 +129,241 @@ def run(
     target: Annotated[float, typer.Option("--target", min=1, max=100)],
     duration: Annotated[str, typer.Option("--duration")],
 ) -> None:
-    """Create artifacts and run the MVP OpenStack soak workflow."""
-    run_dir = _create_run_dir()
+    """Plan, provision, measure and finalize one owned OpenStack run."""
     cfg = load_config(config)
+    duration_s = duration_seconds(duration)
+    if duration_s <= 0:
+        raise typer.BadParameter("duration must be positive")
+    if cfg.workloads.network.enabled and duration_s <= cfg.workloads.network.omit_seconds + 2:
+        raise typer.BadParameter("network duration must exceed omit_seconds + 2")
+    run_dir = _create_run_dir()
     state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=duration)
-    state.failure_budget_remaining = cfg.run.failure_budget
     state.project_name = f"{cfg.resources.project_prefix}-{run_dir.name}"
     save_state(run_dir, state)
+    _write_run_config(run_dir, config, cfg)
     events = EventWriter(run_dir / "events.jsonl", run_dir.name)
     metrics = MetricWriter(run_dir / "metrics.jsonl", run_dir.name)
-    flavor_specs = default_flavor_specs(cfg)
+    atomic_write_json(
+        run_dir / "runtime.json",
+        {
+            "python": sys.version,
+            "source_sha256": _source_digest(),
+            "packages": {
+                name: version(name) for name in ["soak-tester", "openstacksdk", "pydantic"]
+            },
+        },
+    )
+    with run_lock(run_dir), _stop_signals() as interrupted:
+        _execute_run(run_dir, state, cfg, duration_s, events, metrics, interrupted)
+    console.print(f"Run artifacts written to {run_dir}")
+
+
+@contextmanager
+def _stop_signals():
+    stopped = threading.Event()
+    previous = {sig: signal.getsignal(sig) for sig in [signal.SIGINT, signal.SIGTERM]}
+    for sig in previous:
+        signal.signal(sig, lambda *_: stopped.set())
     try:
-        conn = admin_connection(os_cloud)
+        yield stopped
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _execute_run(run_dir, state, cfg, duration_s, events, metrics, interrupted):
+    conn = None
+    failure = None
+
+    def stop_requested():
+        return interrupted.is_set() or load_state(run_dir).stop_requested
+
+    try:
+        conn = admin_connection(state.os_cloud)
         _prepare_openstack_context(conn, cfg)
-        flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
-    except Exception as exc:
-        events.write(level="warning", plane="control", event="openstack_lookup_unavailable", details={"error": str(exc)})
-    soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
-    _write_run_config(run_dir, config, cfg)
-    write_plan(run_dir / "plan.yaml", soak_plan)
-    state.status = "provisioning"
-    state.timeline.provisioning_started_at = utcnow_iso()
-    save_state(run_dir, state)
-    try:
-        conn = admin_connection(os_cloud)
+        flavors = _preflight(conn, cfg, run_dir=run_dir)
+        atomic_write_json(
+            run_dir / "flavors.json",
+            {name: spec.model_dump(mode="json") for name, spec in flavors.items()},
+        )
+        soak_plan = create_plan(
+            cfg, target_percent=state.target_percent, flavor_specs=flavors, run_id=state.run_id
+        )
+        _write_run_config(run_dir, run_dir / "config.yaml", cfg)
+        write_plan(run_dir / "plan.yaml", soak_plan)
+        if stop_requested():
+            raise InterruptedError("Stop requested before provisioning")
+        state.status = "provisioning"
+        state.timeline.provisioning_started_at = utcnow_iso()
+        save_state(run_dir, state)
         provision_result = provision_openstack_run(
             run_dir=run_dir,
-            run_id=run_dir.name,
+            run_id=state.run_id,
             project_name=state.project_name,
             config=cfg,
             plan=soak_plan,
             admin_conn=conn,
-            duration=duration,
+            duration=state.duration,
+            stop_requested=stop_requested,
         )
         state.controller_url = provision_result["controller_url"]
-    except Exception as exc:
-        events.write(
-            level="error",
-            plane="control",
-            event="provisioning_failed",
-            details={"error": str(exc)},
-        )
-        state.status = "failed"
-        state.timeline.ended_at = utcnow_iso()
-        save_state(run_dir, state)
-        try:
-            cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
-        except Exception as cleanup_exc:
-            events.write(
-                level="error",
-                plane="control",
-                event="cleanup_after_failure_failed",
-                details={"error": str(cleanup_exc)},
+        placement = read_json(run_dir / "placement.json", [])
+        for index, item in enumerate(placement):
+            server = conn.compute.get_server(item["server_id"])
+            placement[index] = placement_record(
+                item["worker_id"], server, plane=item["plane"], role=item["role"]
             )
-        generate_final_report(run_dir)
-        raise
-    state.status = "running"
-    if state.controller_url:
-        wait_for_controller(state.controller_url, timeout_seconds=120)
-        wait_for_worker_heartbeats(
+        atomic_write_json(run_dir / "placement.json", placement)
+        save_state(run_dir, state)
+        if not state.controller_url or not wait_for_controller(
+            state.controller_url,
+            timeout_seconds=120,
+            diagnostics_path=run_dir / "readiness-controller.jsonl",
+            stop_requested=stop_requested,
+        ):
+            raise RuntimeError("Controller did not become ready within deadline")
+        if not wait_for_worker_heartbeats(
             state.controller_url,
             expected_worker_ids=_expected_worker_ids(soak_plan),
             timeout_seconds=300,
-        )
-    state.timeline.steady_state_started_at = utcnow_iso()
-    save_state(run_dir, state)
-    events.write(level="info", plane="control", event="run_started")
-    duration_s = duration_seconds(duration)
-    if cfg.workloads.api.enabled and cfg.workloads.api.engine == "rally":
-        _run_rally_api_with_periodic_collection(
-            run_dir=run_dir,
-            state=state,
-            cfg=cfg,
-            duration_s=duration_s,
-            metrics=metrics,
-            events=events,
-        )
-    elif cfg.workloads.api.enabled and soak_plan.api.target_ops_per_second > 0:
-        api_workload = ApiWorkload(
-            conn=provision_result["project_conn"],
-            operation_mix=cfg.workloads.api.operation_mix,
-            target_ops_per_second=soak_plan.api.target_ops_per_second,
-            duration_seconds=duration_s,
-            run_id=run_dir.name,
-            project_name=state.project_name,
-            network_id=_run_network_id(provision_result["tracker"]),
-            metric_writer=metrics,
-            event_writer=events,
-            tracker=provision_result["tracker"],
-            create_delete_volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
-        )
-        _run_api_workload_with_periodic_collection(api_workload, run_dir=run_dir, state=state)
-    else:
-        _sleep_with_periodic_collection(duration_s, run_dir=run_dir, state=state)
-    state.timeline.steady_state_ended_at = utcnow_iso()
-    state.timeline.ended_at = utcnow_iso()
-    state.status = "left-running" if cfg.run.leave_running else "completed"
-    save_state(run_dir, state)
-    if state.controller_url:
-        state.summary["controller_collection"] = collect_controller_artifacts(
-            run_dir,
-            state.controller_url,
-            state.run_id,
-        )
+            diagnostics_path=run_dir / "readiness-workers.jsonl",
+            stop_requested=stop_requested,
+        ):
+            raise RuntimeError("Not all workers reported ready within deadline")
+        if stop_requested():
+            raise InterruptedError("Stop requested during provisioning")
+        state.status = "running"
+        state.timeline.steady_state_started_at = utcnow_iso()
         save_state(run_dir, state)
-    generate_final_report(run_dir)
-    if cfg.run.cleanup_on_success and not cfg.run.leave_running:
-        cleanup_actions = cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
-        state.status = "completed"
-        state.timeline.cleanup_started_at = state.timeline.steady_state_ended_at
-        state.timeline.cleanup_ended_at = utcnow_iso()
-        state.summary["cleanup_actions"] = cleanup_actions
+        events.write(level="info", plane="control", event="run_started")
+        response = requests.post(
+            state.controller_url + "/control",
+            json={"duration_seconds": duration_s},
+            headers={"authorization": "Bearer " + (run_dir / "controller-token").read_text()},
+            timeout=10,
+        )
+        response.raise_for_status()
+        state.summary["guest_workload_window"] = response.json()
         save_state(run_dir, state)
-    console.print(f"Run artifacts written to {run_dir}")
-    console.print("OpenStack resources were provisioned for this run. See resources.json and placement.json.")
+        if cfg.workloads.api.enabled and cfg.workloads.api.engine == "rally":
+            _run_rally_api_with_periodic_collection(
+                run_dir=run_dir,
+                state=state,
+                cfg=cfg,
+                duration_s=duration_s,
+                metrics=metrics,
+                events=events,
+                stop_requested=stop_requested,
+            )
+        elif cfg.workloads.api.enabled:
+            workload = ApiWorkload(
+                conn=provision_result["project_conn"],
+                operation_mix=cfg.workloads.api.operation_mix,
+                create_delete_volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
+                target_ops_per_second=soak_plan.api.target_ops_per_second,
+                duration_seconds=duration_s,
+                run_id=state.run_id,
+                project_name=state.project_name,
+                network_id=_run_network_id(provision_result["tracker"]),
+                metric_writer=metrics,
+                event_writer=events,
+                tracker=provision_result["tracker"],
+                stop_requested=stop_requested,
+            )
+            _run_api_workload_with_periodic_collection(workload, run_dir=run_dir, state=state)
+        else:
+            _sleep_with_periodic_collection(
+                duration_s, run_dir=run_dir, state=state, stop_requested=stop_requested
+            )
+        if stop_requested():
+            raise InterruptedError("Stop requested")
+        _sleep_with_periodic_collection(
+            20, run_dir=run_dir, state=state, stop_requested=stop_requested
+        )
+        state.summary["workload_status"] = "completed"
+    except BaseException as exc:
+        failure = exc
+        state.summary["workload_status"] = (
+            "interrupted" if isinstance(exc, (KeyboardInterrupt, InterruptedError)) else "failed"
+        )
+        events.write(
+            level="error",
+            plane="control",
+            event="run_failed",
+            details={"error": str(exc), "type": type(exc).__name__},
+        )
+    finally:
+        if state.timeline.steady_state_started_at:
+            state.timeline.steady_state_ended_at = utcnow_iso()
+        state.timeline.ended_at = utcnow_iso()
+        # Preserve diagnostics before any deletion; one failed collection must not suppress the other.
+        if state.controller_url:
+            try:
+                state.summary["controller_collection"] = collect_controller_artifacts(
+                    run_dir, state.controller_url, state.run_id
+                )
+            except Exception as exc:
+                events.write(
+                    level="warning",
+                    plane="control",
+                    event="collection_failed",
+                    details={"error": str(exc)},
+                )
+        state.status = "failed" if failure else "completed"
+        save_state(run_dir, state)
+        if (run_dir / "plan.yaml").exists():
+            try:
+                evidence = assess_run(run_dir)
+                state.summary["evidence"] = evidence
+                if not failure and (evidence["errors"] or not evidence["workload_success"]):
+                    failure = RuntimeError(
+                        "Workload or measurement evidence incomplete; see final-report.json"
+                    )
+                    state.status = "failed"
+            except Exception as exc:
+                if not failure:
+                    failure = exc
+                    state.status = "failed"
+        if failure and conn is not None:
+            try:
+                collect_failure_console_outputs(conn, run_dir)
+            except Exception as exc:
+                events.write(
+                    level="warning",
+                    plane="control",
+                    event="failure_diagnostics_failed",
+                    details={"error": str(exc)},
+                )
+        if cfg.run.keep_resources:
+            state.summary["cleanup_status"] = "retained"
+            if not failure:
+                state.status = "left-running"
+        else:
+            state.timeline.cleanup_started_at = utcnow_iso()
+            try:
+                cleanup_run(run_dir, conn=conn or admin_connection(state.os_cloud))
+                receipt = read_json(run_dir / "cleanup.json", {})
+                state.summary["cleanup_status"] = receipt.get("status", "failed")
+            except Exception as exc:
+                state.summary["cleanup_status"] = "failed"
+                events.write(
+                    level="error",
+                    plane="control",
+                    event="cleanup_failed",
+                    details={"error": str(exc)},
+                )
+            state.timeline.cleanup_ended_at = utcnow_iso()
+            if state.summary["cleanup_status"] != "passed" and not failure:
+                state.status = "cleanup-failed"
+        save_state(run_dir, state)
+        if (run_dir / "plan.yaml").exists():
+            report_error = _final_report(run_dir, state)
+            if report_error and not failure:
+                failure = report_error
+    if failure:
+        raise failure
+    if state.summary.get("cleanup_status") == "failed":
+        raise RuntimeError("Cleanup absence verification failed; see cleanup.json")
 
 
 def _run_api_workload_with_periodic_collection(
@@ -251,9 +383,12 @@ def _run_api_workload_with_periodic_collection(
 
     thread = threading.Thread(target=target, name="soak-api-workload")
     thread.start()
+    next_collection = time.monotonic() + interval_seconds
     while thread.is_alive():
-        thread.join(timeout=interval_seconds)
-        _collect_controller_periodic(run_dir, state)
+        thread.join(timeout=1)
+        if time.monotonic() >= next_collection:
+            _collect_controller_periodic(run_dir, state)
+            next_collection = time.monotonic() + interval_seconds
     if errors:
         raise errors[0]
 
@@ -267,6 +402,7 @@ def _run_rally_api_with_periodic_collection(
     metrics: MetricWriter,
     events: EventWriter,
     interval_seconds: int = 60,
+    stop_requested=lambda: False,
 ) -> None:
     errors: list[BaseException] = []
 
@@ -278,22 +414,23 @@ def _run_rally_api_with_periodic_collection(
                 auth=auth,
                 duration_seconds=duration_s,
                 concurrency=cfg.workloads.api.rally_concurrency,
-                times=cfg.workloads.api.rally_times,
-                volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
-                include_create_delete=cfg.workloads.api.rally_include_create_delete,
                 error_rate_max=cfg.workloads.api.rally_error_rate_max,
                 mode=cfg.workloads.api.rally_mode,
                 metric_writer=metrics,
                 event_writer=events,
+                command_runner=_cancellable_rally_runner(stop_requested),
             )
         except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread.
             errors.append(exc)
 
     thread = threading.Thread(target=target, name="soak-api-rally-workload")
     thread.start()
+    next_collection = time.monotonic() + interval_seconds
     while thread.is_alive():
-        thread.join(timeout=interval_seconds)
-        _collect_controller_periodic(run_dir, state)
+        thread.join(timeout=1)
+        if time.monotonic() >= next_collection:
+            _collect_controller_periodic(run_dir, state)
+            next_collection = time.monotonic() + interval_seconds
     if errors:
         raise errors[0]
 
@@ -303,22 +440,36 @@ def _sleep_with_periodic_collection(
     *,
     run_dir: Path,
     state,
-    interval_seconds: int = 60,
+    interval_seconds: int = 1,
+    stop_requested=lambda: False,
 ) -> None:
     deadline = time.monotonic() + duration_s
+    next_collection = time.monotonic() + 60
     while True:
+        if stop_requested():
+            raise InterruptedError("Stop requested")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
         time.sleep(min(interval_seconds, remaining))
-        _collect_controller_periodic(run_dir, state)
+        if time.monotonic() >= next_collection:
+            _collect_controller_periodic(run_dir, state)
+            next_collection = time.monotonic() + 60
 
 
 def _collect_controller_periodic(run_dir: Path, state) -> None:
     if not state.controller_url:
         return
-    counts = collect_controller_artifacts(run_dir, state.controller_url, state.run_id)
-    summary = state.summary.setdefault("controller_collection_periodic", {"events": 0, "metrics": 0})
+    try:
+        counts = collect_controller_artifacts(run_dir, state.controller_url, state.run_id)
+    except Exception as exc:
+        EventWriter(run_dir / "events.jsonl", state.run_id).write(
+            level="warning", plane="control", event="collection_failed", details={"error": str(exc)}
+        )
+        return
+    summary = state.summary.setdefault(
+        "controller_collection_periodic", {"events": 0, "metrics": 0}
+    )
     summary["events"] += counts.get("events", 0)
     summary["metrics"] += counts.get("metrics", 0)
     save_state(run_dir, state)
@@ -377,19 +528,38 @@ def cleanup(
 ) -> None:
     """Clean up resources owned by a run."""
     state = load_state(run)
-    state.status = "cleaning-up"
-    state.timeline.cleanup_started_at = utcnow_iso()
-    save_state(run, state)
-    conn = None if dry_run else admin_connection(state.os_cloud or "sunbeam-admin")
-    actions = cleanup_run(run, conn=conn, dry_run=dry_run)
     if dry_run:
-        console.print(json.dumps(actions, indent=2))
+        console.print(json.dumps(cleanup_run(run, dry_run=True), indent=2))
         return
-    state.status = "completed" if not any("error" in action for action in actions) else "cleanup-failed"
-    state.timeline.cleanup_ended_at = utcnow_iso()
-    save_state(run, state)
-    console.print(f"Cleanup finished with status: {state.status}")
-    console.print(json.dumps(actions, indent=2))
+    with run_lock(run):
+        state.timeline.cleanup_started_at = utcnow_iso()
+        save_state(run, state)
+        cleanup_error = None
+        try:
+            actions = cleanup_run(run, conn=admin_connection(state.os_cloud or "sunbeam-admin"))
+        except Exception as exc:
+            cleanup_error = exc
+            actions = []
+        receipt = read_json(run / "cleanup.json", {})
+        state.summary["cleanup_status"] = receipt.get("status", "failed")
+        state.status = (
+            (
+                "failed"
+                if state.status == "failed"
+                or state.summary.get("workload_status") in {"failed", "interrupted"}
+                else "completed"
+            )
+            if receipt.get("status") == "passed"
+            else "cleanup-failed"
+        )
+        state.timeline.cleanup_ended_at = utcnow_iso()
+        save_state(run, state)
+        if (run / "plan.yaml").exists():
+            report_error = _final_report(run, state)
+            cleanup_error = cleanup_error or report_error
+        console.print(json.dumps(actions, indent=2))
+        if cleanup_error or receipt.get("status") != "passed":
+            raise typer.Exit(1)
 
 
 @observability_app.command("inspect")
@@ -407,255 +577,9 @@ def observability_report(run: Annotated[Path, typer.Option("--run", exists=True)
     console.print(json.dumps(correlation_report(run), indent=2))
 
 
-@calibrate_app.command("network")
-def calibrate_network(
-    os_cloud: Annotated[str, typer.Option("--os-cloud")],
-    config: Annotated[Path, typer.Option("--config", exists=True)],
-    duration: Annotated[str, typer.Option("--duration")] = "10m",
-    target: Annotated[float, typer.Option("--target", min=1, max=100)] = 100,
-) -> None:
-    """Run a network-only calibration and write run artifacts."""
-    run_dir = _create_run_dir()
-    cfg = load_config(config)
-    cfg.workloads.compute.enabled = False
-    cfg.workloads.storage.enabled = False
-    cfg.workloads.api.enabled = False
-    cfg.run.leave_running = False
-    cfg.run.cleanup_on_success = True
-    state = initial_state(run_dir.name, target_percent=target, os_cloud=os_cloud, duration=duration)
-    state.project_name = f"{cfg.resources.project_prefix}-{run_dir.name}"
-    state.summary["calibration"] = "network"
-    save_state(run_dir, state)
-    events = EventWriter(run_dir / "events.jsonl", run_dir.name)
-    conn = admin_connection(os_cloud)
-    _prepare_openstack_context(conn, cfg)
-    flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
-    soak_plan = create_plan(cfg, target_percent=target, flavor_specs=flavor_specs, run_id=run_dir.name)
-    _write_run_config(run_dir, config, cfg)
-    write_plan(run_dir / "plan.yaml", soak_plan)
-    state.status = "provisioning"
-    state.timeline.provisioning_started_at = utcnow_iso()
-    save_state(run_dir, state)
-    provision_result = provision_openstack_run(
-        run_dir=run_dir,
-        run_id=run_dir.name,
-        project_name=state.project_name,
-        config=cfg,
-        plan=soak_plan,
-        admin_conn=conn,
-        duration=duration,
-    )
-    state.controller_url = provision_result["controller_url"]
-    state.status = "running"
-    state.timeline.steady_state_started_at = utcnow_iso()
-    save_state(run_dir, state)
-    if state.controller_url:
-        wait_for_controller(state.controller_url, timeout_seconds=120)
-        wait_for_worker_heartbeats(
-            state.controller_url,
-            expected_worker_ids=_expected_worker_ids(soak_plan),
-            timeout_seconds=300,
-        )
-    events.write(level="info", plane="network", event="network_calibration_started")
-    time.sleep(duration_seconds(duration))
-    if state.controller_url:
-        state.summary["controller_collection"] = collect_controller_artifacts(
-            run_dir,
-            state.controller_url,
-            state.run_id,
-        )
-    state.timeline.steady_state_ended_at = utcnow_iso()
-    state.timeline.ended_at = utcnow_iso()
-    state.status = "completed"
-    save_state(run_dir, state)
-    report = generate_final_report(run_dir)
-    calibration = {
-        "run_id": run_dir.name,
-        "target_percent": target,
-        "duration": duration,
-        "planned_network": soak_plan.network.model_dump(mode="json"),
-        "achieved": report.get("achieved", {}),
-        "note": "Calibration is workload-observed guest iperf evidence, not physical fabric proof.",
-    }
-    (run_dir / "network-calibration.json").write_text(json.dumps(calibration, indent=2), encoding="utf-8")
-    if cfg.run.cleanup_on_success:
-        cleanup_run(run_dir, conn=admin_connection(os_cloud), dry_run=False)
-    console.print(f"Network calibration artifacts written to {run_dir}")
-
-
-@calibrate_app.command("api")
-def calibrate_api(
-    os_cloud: Annotated[str, typer.Option("--os-cloud")],
-    config: Annotated[Path, typer.Option("--config", exists=True)],
-    duration: Annotated[str, typer.Option("--duration")] = "10m",
-    max_concurrency: Annotated[int, typer.Option("--max-concurrency", min=1)] = 32,
-) -> None:
-    """Run a Rally API calibration ramp and write a recommended profile."""
-    run_dir = _create_run_dir()
-    cfg = load_config(config)
-    cfg.workloads.api.engine = "rally"
-    conn = admin_connection(os_cloud)
-    _prepare_openstack_context(conn, cfg)
-    events = EventWriter(run_dir / "events.jsonl", run_dir.name)
-    metrics = MetricWriter(run_dir / "metrics.jsonl", run_dir.name)
-    _write_run_config(run_dir, config, cfg)
-    auth = {
-        "auth_url": conn.config.auth.get("auth_url"),
-        "username": conn.config.auth.get("username"),
-        "password": conn.config.auth.get("password"),
-        "project_name": conn.config.auth.get("project_name")
-        or conn.config.auth.get("tenant_name"),
-        "user_domain_name": conn.config.auth.get("user_domain_name", cfg.openstack.user_domain_name),
-        "project_domain_name": conn.config.auth.get(
-            "project_domain_name",
-            cfg.openstack.project_domain_name,
-        ),
-        "region_name": getattr(conn.config, "region_name", None),
-        "interface": getattr(conn.config, "interface", None),
-    }
-    selected = None
-    attempts = []
-    for concurrency in _api_calibration_steps(max_concurrency):
-        step_dir = ensure_dir(run_dir / "api-rally" / f"concurrency-{concurrency:03d}")
-        step_run_dir = step_dir.parent.parent
-        del step_run_dir
-        cfg.workloads.api.rally_concurrency = concurrency
-        events.write(
-            level="info",
-            plane="api",
-            event="api_calibration_step_started",
-            details={"concurrency": concurrency},
-        )
-        try:
-            summary = run_rally_api_workload(
-                run_dir=run_dir,
-                auth=auth,
-                duration_seconds=duration_seconds(duration),
-                concurrency=concurrency,
-                times=None,
-                volume_size_gib=cfg.workloads.api.create_delete_volume_size_gib,
-                include_create_delete=cfg.workloads.api.rally_include_create_delete,
-                error_rate_max=cfg.workloads.api.rally_error_rate_max,
-                metric_writer=metrics,
-                event_writer=events,
-            )
-        except Exception as exc:
-            attempts.append({"concurrency": concurrency, "status": "failed", "error": str(exc)})
-            break
-        record = {
-            "concurrency": concurrency,
-            "status": "passed" if summary.errors == 0 else "failed",
-            "success_ops_per_second": summary.success_ops_per_second,
-            "total_ops_per_second": summary.total_ops_per_second,
-            "errors": summary.errors,
-            "error_rate": summary.error_rate,
-            "latency_p95_ms": summary.latency_p95_ms,
-            "latency_p99_ms": summary.latency_p99_ms,
-        }
-        attempts.append(record)
-        if summary.errors == 0:
-            selected = record
-        else:
-            break
-    recommended = cfg.model_dump(mode="json")
-    if selected:
-        recommended["workloads"]["api"]["rally_concurrency"] = selected["concurrency"]
-        recommended["targets"]["api"]["ops_per_second"] = selected["success_ops_per_second"]
-    calibration = {
-        "schema_version": 1,
-        "run_id": run_dir.name,
-        "engine": "rally",
-        "duration": duration,
-        "selected": selected,
-        "attempts": attempts,
-        "generated_config_file": "recommended-profile.yaml",
-    }
-    (run_dir / "api-calibration.json").write_text(
-        json.dumps(calibration, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (run_dir / "recommended-profile.yaml").write_text(
-        yaml.safe_dump(recommended, sort_keys=False),
-        encoding="utf-8",
-    )
-    console.print(f"API calibration written to {run_dir / 'api-calibration.json'}")
-    console.print(f"Recommended profile written to {run_dir / 'recommended-profile.yaml'}")
-
-
-@calibrate_app.command("cloud")
-def calibrate_cloud(
-    os_cloud: Annotated[str, typer.Option("--os-cloud")],
-    config: Annotated[Path, typer.Option("--config", exists=True)],
-) -> None:
-    """Discover OpenStack-advertised capacity and write calibration artifacts."""
-    run_dir = _create_run_dir()
-    cfg = load_config(config)
-    conn = admin_connection(os_cloud)
-    _prepare_openstack_context(conn, cfg)
-    calibration = discover_cloud_capacity(conn, cfg)
-    generated_config = build_calibrated_config(
-        config=cfg,
-        cpu_vcpus=int(calibration["generated_capacity"]["compute"]["vcpus"]),
-        memory_ram_gib=float(calibration["generated_capacity"]["compute"]["ram_gib"]),
-        cpu_resource_class=str(
-            calibration["generated_capacity"]["compute"]["cpu_resource_class"]
-        ),
-    )
-    (run_dir / "calibration.json").write_text(
-        json.dumps(calibration, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    (run_dir / "calibrated-capacity.yaml").write_text(
-        yaml.safe_dump(generated_config, sort_keys=False),
-        encoding="utf-8",
-    )
-    console.print(f"Calibration written to {run_dir / 'calibration.json'}")
-    console.print(f"Generated config written to {run_dir / 'calibrated-capacity.yaml'}")
-    compute = calibration["compute"]["cpu"]["selected"]
-    memory = calibration["compute"]["memory"]
-    console.print(
-        "Compute: "
-        f"{compute['allocatable']} {compute['resource_class']} guest cores, "
-        f"{memory['allocatable_gib']} GiB RAM"
-    )
-
-
-@calibrate_app.command("profile")
-def calibrate_profile(
-    os_cloud: Annotated[str, typer.Option("--os-cloud")],
-    config: Annotated[Path, typer.Option("--config", exists=True)],
-    target: Annotated[float, typer.Option("--target", min=1, max=100)] = 80,
-    validation_run: Annotated[
-        list[Path] | None,
-        typer.Option("--validation-run", exists=True, help="Existing run directory to use as validation evidence."),
-    ] = None,
-) -> None:
-    """Build a tuned calibration profile for per-plane target percentages."""
-    run_dir = _create_run_dir()
-    cfg = load_config(config)
-    conn = admin_connection(os_cloud)
-    _prepare_openstack_context(conn, cfg)
-    cloud_calibration = discover_cloud_capacity(conn, cfg)
-    flavor_specs = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
-    profile, tuned_config = build_calibration_profile(
-        config=cfg,
-        cloud_calibration=cloud_calibration,
-        flavor_specs=flavor_specs,
-        target_percent=target,
-        validation_runs=validation_run or [],
-    )
-    (run_dir / "calibration.json").write_text(
-        json.dumps(cloud_calibration, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    write_calibration_profile(run_dir, profile, tuned_config)
-    console.print(f"Calibration profile written to {run_dir / 'calibration-profile.json'}")
-    console.print(f"Recommended profile written to {run_dir / 'recommended-profile.yaml'}")
-
-
 def _create_run_dir() -> Path:
     run_dir = Path("runs") / make_run_id()
-    ensure_dir(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
     ensure_dir(run_dir / "worker-logs")
     ensure_dir(run_dir / "controller")
     ensure_dir(run_dir / "observability")
@@ -664,15 +588,25 @@ def _create_run_dir() -> Path:
 
 def _expected_worker_ids(soak_plan) -> set[str]:
     worker_ids = {f"compute-{index:03d}" for index in range(soak_plan.compute.worker_count)}
-    worker_ids.update(f"network-receiver-{index:03d}" for index in range(soak_plan.network.receiver_count))
-    worker_ids.update(f"network-sender-{index:03d}" for index in range(soak_plan.network.sender_count))
+    worker_ids.update(
+        f"network-receiver-{index:03d}" for index in range(soak_plan.network.receiver_count)
+    )
+    worker_ids.update(
+        f"network-sender-{index:03d}" for index in range(soak_plan.network.sender_count)
+    )
     worker_ids.update(f"storage-{index:03d}" for index in range(soak_plan.storage.worker_count))
     return worker_ids
 
 
 def _required_flavor_names(cfg) -> set[str]:
-    names = set(cfg.flavors.model_dump().values())
-    names.update(cfg.workloads.compute.flavor_mix)
+    names = {cfg.flavors.controller}
+    for plane in ["compute", "network", "storage"]:
+        if getattr(cfg.workloads, plane).enabled:
+            flavor = getattr(cfg.flavors, plane + "_worker")
+            if flavor:
+                names.add(flavor)
+    if cfg.workloads.compute.enabled:
+        names.update(cfg.workloads.compute.flavor_mix)
     return names
 
 
@@ -691,12 +625,11 @@ def _write_run_config(run_dir: Path, source: Path, cfg: object) -> None:
 def _prepare_openstack_context(conn: object, cfg: object) -> None:
     network = cfg.targets.network
     workload = cfg.workloads.network
-    if network.scope != "per_host" or workload.hosts:
+    if not workload.enabled or network.scope != "per_host" or workload.hosts:
         return
     hosts = list_hypervisor_names(conn)
     if hosts:
         workload.hosts = hosts
-        workload.host_count = len(hosts)
 
 
 def _print_checks(checks: list[tuple[str, str]]) -> None:
@@ -706,14 +639,6 @@ def _print_checks(checks: list[tuple[str, str]]) -> None:
     console.print(table)
 
 
-def _api_calibration_steps(max_concurrency: int) -> list[int]:
-    candidates = [1, 2, 4, 8, 12, 16, 24, 32, 48, 64]
-    steps = [value for value in candidates if value <= max_concurrency]
-    if max_concurrency not in steps:
-        steps.append(max_concurrency)
-    return steps
-
-
 def _print_status(payload: dict[str, object]) -> None:
     state = payload["state"]
     console.print(f"Run: {state['run_id']}")
@@ -721,3 +646,143 @@ def _print_status(payload: dict[str, object]) -> None:
     console.print(f"Target: {state['target_percent']}%")
     if payload.get("controller"):
         console.print(json.dumps(payload["controller"], indent=2))
+
+
+RALLY_STOP_TIMEOUT_SECONDS = 10
+
+
+def _cancellable_rally_runner(stop_requested):
+    # One deadline covers every concurrent task and its report/local teardown.
+    # Campaign force-kill grace must exceed this budget so no Rally group can
+    # survive the runner and race fallback cloud cleanup.
+    cancellation_started = None
+    cancellation_lock = threading.Lock()
+
+    def stopped_at():
+        nonlocal cancellation_started
+        if stop_requested():
+            with cancellation_lock:
+                if cancellation_started is None:
+                    cancellation_started = time.monotonic()
+        return cancellation_started
+
+    def execute(command, *, check=False, **kwargs):
+        cleanup_command = "destroy" in command or "report" in command
+        stopped = stopped_at()
+        if stopped is not None and (
+            not cleanup_command or time.monotonic() >= stopped + RALLY_STOP_TIMEOUT_SECONDS
+        ):
+            raise InterruptedError("Stop requested")
+        process = subprocess.Popen(command, start_new_session=True, **kwargs)
+        cancelled = False
+        signal_sent = 0
+        try:
+            while True:
+                stopped = stopped_at()
+                if stopped is not None:
+                    elapsed = time.monotonic() - stopped
+                    desired_signal = (
+                        signal.SIGKILL
+                        if elapsed >= RALLY_STOP_TIMEOUT_SECONDS
+                        else signal.SIGTERM
+                        if elapsed >= RALLY_STOP_TIMEOUT_SECONDS / 2
+                        else signal.SIGINT
+                        if not cleanup_command
+                        else 0
+                    )
+                    if desired_signal and desired_signal != signal_sent:
+                        try:
+                            os.killpg(process.pid, desired_signal)
+                        except ProcessLookupError:
+                            pass
+                        signal_sent = desired_signal
+                        cancelled = True
+                try:
+                    stdout, stderr = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise
+        # The command leader may exit before descendants that ignored INT.
+        # Retire its entire group before permitting cloud cleanup.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if cancelled or (stopped_at() is not None and not cleanup_command):
+            raise InterruptedError("Rally stopped before cleanup")
+        result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        if check:
+            result.check_returncode()
+        return result
+
+    return execute
+
+
+def _preflight(conn, cfg, *, run_dir=None):
+    conn.authorize()
+    get_role(conn, cfg.openstack.member_role)
+    image = require_image(conn, cfg.openstack.image)
+    external = None
+    if cfg.resources.create_router:
+        external = require_external_network(conn, cfg.openstack.external_network)
+    if cfg.workloads.storage.enabled:
+        require_volume_type(conn, cfg.workloads.storage.volume_type)
+    if cfg.workloads.api.enabled and cfg.workloads.api.engine == "rally":
+        require_rally()
+    flavors = {name: require_flavor(conn, name) for name in _required_flavor_names(cfg)}
+    if cfg.workloads.network.enabled and cfg.workloads.network.vnic_type == "direct":
+        specs = flavors[cfg.flavors.network_worker].extra_specs
+        if str(specs.get("hw:vif_multiqueue_enabled", "false")).lower() in {"true", "1"}:
+            raise ValueError("direct network flavor carries virtio-only hw:vif_multiqueue_enabled")
+    if run_dir is not None:
+        atomic_write_json(
+            run_dir / "prerequisites.json",
+            {
+                "image": {
+                    key: getattr(image, key, None)
+                    for key in ["id", "name", "checksum", "created_at"]
+                },
+                "external_network": {
+                    key: getattr(external, key, None) for key in ["id", "name", "mtu"]
+                }
+                if external
+                else None,
+                "assumptions": [
+                    "cloud endpoints and quota policy permit the planned resources",
+                    "images and flavors remain unchanged during the run",
+                    "guest clocks are synchronized",
+                    "worker image contains stress-ng, iperf3 and fio for enabled planes",
+                ],
+            },
+        )
+    return flavors
+
+
+def _source_digest():
+    digest = hashlib.sha256()
+    root = Path(__file__).parent
+    for path in sorted(root.rglob("*.py")):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _final_report(run_dir, state):
+    try:
+        generate_final_report(run_dir)
+    except Exception as exc:
+        state.summary["report_error"] = str(exc)
+        state.status = "failed"
+        save_state(run_dir, state)
+        EventWriter(run_dir / "events.jsonl", state.run_id).write(
+            level="error", plane="control", event="report_failed", details={"error": str(exc)}
+        )
+        return exc
+    return None

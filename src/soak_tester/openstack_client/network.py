@@ -7,12 +7,16 @@ def require_external_network(conn: Any, name: str) -> Any:
     network = conn.network.find_network(name)
     if network is None:
         raise RuntimeError(f"external network not found: {name}")
-    if not (getattr(network, "is_router_external", False) or getattr(network, "router:external", False)):
+    if not (
+        getattr(network, "is_router_external", False) or getattr(network, "router:external", False)
+    ):
         raise RuntimeError(f"network is not router-external: {name}")
     return network
 
 
-def create_security_group_rules(conn: Any, security_group: Any, *, cidr: str, allowed_cidrs: list[str], port: int) -> None:
+def create_security_group_rules(
+    conn: Any, security_group: Any, *, cidr: str, allowed_cidrs: list[str], port: int
+) -> None:
     conn.network.create_security_group_rule(
         security_group_id=security_group.id,
         direction="ingress",

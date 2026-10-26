@@ -43,6 +43,7 @@ class ApiWorkload:
         create_delete_volume_size_gib: int = 1,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        stop_requested: Callable[[], bool] = lambda: False,
     ):
         self.conn = conn
         self.operations = build_operation_sequence(operation_mix)
@@ -57,6 +58,7 @@ class ApiWorkload:
         self.create_delete_volume_size_gib = create_delete_volume_size_gib
         self.sleep = sleeper
         self.clock = clock
+        self.stop_requested = stop_requested
         self.created_index = 0
 
     def run(self) -> OperationResult:
@@ -68,13 +70,30 @@ class ApiWorkload:
         interval = 1 / self.target_ops_per_second if self.target_ops_per_second > 0 else 0
         next_attempt = start
         while self.clock() < deadline and result.attempts < max_attempts:
+            if self.stop_requested():
+                raise InterruptedError("Stop requested")
             if interval > 0:
                 wait = next_attempt - self.clock()
-                if wait > 0:
-                    self.sleep(wait)
+                while wait > 0 and self.clock() < deadline:
+                    if self.stop_requested():
+                        raise InterruptedError("Stop requested")
+                    self.sleep(min(wait, 1, deadline - self.clock()))
+                    wait = next_attempt - self.clock()
                 next_attempt += interval
+            if self.stop_requested():
+                raise InterruptedError("Stop requested")
+            if self.clock() >= deadline:
+                break
             operation = self.operations[result.attempts % len(self.operations)]
             self._run_operation(operation, result)
+        # The offered rate covers the requested run window, including the tail
+        # after the last scheduled operation; do not inflate low-rate results.
+        while (remaining := deadline - self.clock()) > 0:
+            if self.stop_requested():
+                raise InterruptedError("Stop requested")
+            self.sleep(min(remaining, 1))
+        if self.stop_requested():
+            raise InterruptedError("Stop requested")
         elapsed = max(self.clock() - start, 0.001)
         self._write_metrics(result, elapsed)
         self.event_writer.write(
@@ -140,8 +159,8 @@ class ApiWorkload:
         self.created_index += 1
         metadata = owned_metadata(self.run_id, "api", "port", self.project_name)
         port = self.conn.network.create_port(name=name, network_id=self.network_id)
-        self._tag_network_resource(port, metadata)
         self._record_resource("port", port.id, port.name, metadata)
+        self._tag_network_resource(port, metadata)
         self.conn.network.delete_port(port.id, ignore_missing=True)
 
     def _create_delete_volume(self) -> None:

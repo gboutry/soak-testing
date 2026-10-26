@@ -1,0 +1,26 @@
+openstack:
+  external_network: external-network
+  image: ubuntu-soak
+management:
+  allowed_cidrs:
+  - 198.51.100.10/32
+flavors:
+  controller: soak-controller
+  network_worker: soak-sriov
+targets:
+  network:
+    gbps: 20
+workloads:
+  compute:
+    enabled: false
+  network:
+    enabled: true
+    flow_duration: 60s
+    offered_load: target
+    target_gbps_per_flow: 10
+    parallel_streams_per_flow: 4
+    vnic_type: direct
+  storage:
+    enabled: false
+  api:
+    enabled: false

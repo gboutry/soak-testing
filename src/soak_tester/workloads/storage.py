@@ -5,7 +5,14 @@ from soak_tester.config import SoakConfig
 
 def fio_command(config: SoakConfig, device: str, duration_seconds: int) -> list[str]:
     workload = config.workloads.storage
-    return [
+    rw = {
+        "mixed-randrw": "randrw",
+        "random-read": "randread",
+        "random-write": "randwrite",
+        "sequential-read": "read",
+        "sequential-write": "write",
+    }[workload.profile]
+    command = [
         "fio",
         "--name=workload",
         "--ioengine=libaio",
@@ -20,10 +27,11 @@ def fio_command(config: SoakConfig, device: str, duration_seconds: int) -> list[
         str(workload.numjobs),
         "--bs",
         workload.block_size,
-        "--rw=randrw",
-        "--rwmixread",
-        str(workload.rwmixread),
+        f"--rw={rw}",
         "--filename",
         device,
         "--output-format=json",
     ]
+    if workload.profile == "mixed-randrw":
+        command.extend(["--rwmixread", str(workload.rwmixread)])
+    return command

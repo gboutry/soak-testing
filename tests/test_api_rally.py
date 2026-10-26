@@ -14,9 +14,6 @@ def test_render_rally_task_uses_control_plane_mix_and_constant_duration_runner()
         render_rally_task(
             duration_seconds=600,
             concurrency=12,
-            times=120,
-            volume_size_gib=1,
-            include_create_delete=True,
         )
     )
 
@@ -142,3 +139,126 @@ def test_parse_rally_report_json_summarizes_aggregate_workloads():
     assert summary.total_ops_per_second == 2
     assert summary.scenarios["Authenticate.validate_nova"].latency_p95_ms == 2500
     assert summary.atomic_actions["authenticate.validate_nova"].latency_p95_ms == 900
+
+
+def test_aggregate_rally_report_does_not_invent_global_percentiles():
+    summary = parse_rally_results(
+        {
+            "tasks": [
+                {
+                    "subtasks": [
+                        {
+                            "workloads": [
+                                {
+                                    "total_iteration_count": 100,
+                                    "statistics": {
+                                        "durations": {"total": {"data": {"95%ile": 1.2}}}
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        },
+        elapsed_seconds=10,
+    )
+    assert summary.latency_p95_ms is None
+    assert next(iter(summary.scenarios.values())).latency_p95_ms == 1200
+
+
+def test_rally_environment_cannot_reuse_inherited_admin_token(monkeypatch):
+    from soak_tester.workloads.api_rally import _rally_env
+
+    monkeypatch.setenv("OS_TOKEN", "do-not-use")
+    monkeypatch.setenv("OS_CLOUD", "admin")
+    monkeypatch.setenv("OS_CACERT", "/trusted/ca.pem")
+    env = _rally_env(
+        {
+            "auth_url": "https://identity",
+            "username": "owned",
+            "password": "owned-secret",
+            "project_name": "owned-project",
+        }
+    )
+    assert "OS_TOKEN" not in env and "OS_CLOUD" not in env
+    assert env["OS_CACERT"] == "/trusted/ca.pem"
+    assert env["OS_USERNAME"] == "owned"
+
+
+def test_single_task_rally_uses_private_database_and_tears_down_on_interruption(
+    monkeypatch, tmp_path
+):
+    import pytest
+    from types import SimpleNamespace
+    from soak_tester.workloads import api_rally
+    from soak_tester.events import EventWriter, MetricWriter
+
+    monkeypatch.setattr(api_rally, "require_rally", lambda: None)
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if "start" in command:
+            raise InterruptedError("stopped task")
+        return SimpleNamespace(returncode=0)
+
+    with pytest.raises(InterruptedError):
+        api_rally.run_rally_api_workload(
+            run_dir=tmp_path,
+            auth={
+                "auth_url": "https://identity",
+                "username": "owned",
+                "password": "owned-secret",
+                "project_name": "owned-project",
+            },
+            duration_seconds=60,
+            concurrency=2,
+            error_rate_max=0,
+            mode="single_task",
+            metric_writer=MetricWriter(tmp_path / "metrics.jsonl", "run"),
+            event_writer=EventWriter(tmp_path / "events.jsonl", "run"),
+            command_runner=runner,
+        )
+    assert all("--config-file" in command for command in calls)
+    assert calls[-1][-4:-2] == ["deployment", "destroy"]
+    assert str(tmp_path) in calls[0][calls[0].index("--config-file") + 1]
+
+
+def test_single_task_rally_rejects_empty_export(monkeypatch, tmp_path):
+    from pathlib import Path
+    import pytest
+    from types import SimpleNamespace
+    from soak_tester.workloads import api_rally
+    from soak_tester.events import EventWriter, MetricWriter
+
+    monkeypatch.setattr(api_rally, "require_rally", lambda: None)
+    monkeypatch.setattr(api_rally, "_task_uuid_from_log", lambda _: "task")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        if "report" in command:
+            Path(command[command.index("--out") + 1]).write_text('{"tasks": []}')
+        return SimpleNamespace(returncode=0)
+
+    with pytest.raises(RuntimeError, match="single_task mode produced no API iterations"):
+        api_rally.run_rally_api_workload(
+            run_dir=tmp_path,
+            auth={
+                "auth_url": "https://identity",
+                "username": "owned",
+                "password": "owned-secret",
+                "project_name": "owned",
+            },
+            duration_seconds=10,
+            concurrency=1,
+            error_rate_max=0,
+            mode="single_task",
+            metric_writer=MetricWriter(tmp_path / "metrics.jsonl", "r"),
+            event_writer=EventWriter(tmp_path / "events.jsonl", "r"),
+            command_runner=runner,
+        )
+    assert "destroy" in calls[-1]
+    assert '"event": "rally_completed"' not in (tmp_path / "events.jsonl").read_text()
+    assert not (tmp_path / "metrics.jsonl").exists()

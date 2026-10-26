@@ -1,23 +1,15 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from soak_tester.config import load_config
+from soak_tester.run import provision
 from soak_tester.run.provision import (
     ResourceTracker,
     _create_private_network,
     _create_worker,
-    _network_sender_legacy_peers,
 )
-
-
-def test_network_senders_do_not_use_legacy_peers_when_flows_are_planned():
-    assert _network_sender_legacy_peers(["10.0.0.10"], planned_flows=True) == []
-
-
-def test_network_senders_keep_legacy_peers_without_planned_flows():
-    assert _network_sender_legacy_peers(["10.0.0.10"], planned_flows=False) == [
-        "10.0.0.10"
-    ]
 
 
 def test_private_network_uses_configured_mtu(tmp_path):
@@ -165,3 +157,34 @@ class FakeConnection:
     def __init__(self):
         self.compute = FakeCompute()
         self.network = FakeNetwork()
+
+
+def test_network_receiver_gate_waits_for_every_receiver(monkeypatch):
+    calls = []
+
+    def wait(url, **kwargs):
+        calls.append((url, kwargs))
+        return True
+
+    monkeypatch.setattr(provision, "wait_for_worker_heartbeats", wait)
+    provision._wait_for_network_receivers("http://controller:8080", 2)
+    assert calls == [
+        (
+            "http://controller:8080",
+            {
+                "expected_worker_ids": {"network-receiver-000", "network-receiver-001"},
+                "timeout_seconds": 300,
+            },
+        )
+    ]
+
+
+def test_network_receiver_gate_rejects_unready_receivers(monkeypatch):
+    monkeypatch.setattr(provision, "wait_for_worker_heartbeats", lambda *a, **kw: False)
+    with pytest.raises(RuntimeError, match="before sender boot"):
+        provision._wait_for_network_receivers("http://controller:8080", 2)
+
+
+def test_network_receiver_gate_requires_reachable_controller():
+    with pytest.raises(RuntimeError, match="reachable controller"):
+        provision._wait_for_network_receivers(None, 2)
